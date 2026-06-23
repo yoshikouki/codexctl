@@ -32,7 +32,9 @@ export type JsonRpcServerRequest = {
 
 export type AppServerEvent =
   | { direction: "client"; message: JsonRpcRequest | JsonRpcNotification; at: string }
-  | { direction: "server"; message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest; at: string };
+  | { direction: "server"; message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest; at: string }
+  | { direction: "worker"; event: JsonObject; at: string }
+  | { direction: "control"; command: JsonObject; at: string };
 
 type PendingRequest = {
   resolve: (value: unknown) => void;

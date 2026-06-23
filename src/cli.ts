@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { readDaemonVersion } from "./app-server.ts";
-import { readJob, readJobEvents, startJob } from "./job.ts";
+import { enqueueSteer, readJob, readJobEvents, readNewEventLines, runJobWorker, startJob } from "./job.ts";
 
 type Args = {
   positionals: string[];
@@ -26,7 +26,8 @@ async function main(argv: string[]): Promise<void> {
     const prompt = requiredString(args, "prompt");
     const model = stringFlag(args, "model") ?? undefined;
     const force = booleanFlag(args, "force");
-    await printJson(await startJob({ key: jobKey, repo, prompt, model, force }));
+    const detach = booleanFlag(args, "detach");
+    await printJson(await startJob({ key: jobKey, repo, prompt, model, force, detach }));
     return;
   }
 
@@ -52,6 +53,21 @@ async function main(argv: string[]): Promise<void> {
     for (const event of await readJobEvents(key)) {
       console.log(JSON.stringify(event));
     }
+    return;
+  }
+
+  if (resource === "job" && action === "watch" && key) {
+    await watchJob(key);
+    return;
+  }
+
+  if (resource === "job" && action === "steer" && key) {
+    await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
+    return;
+  }
+
+  if (resource === "internal" && action === "worker" && key) {
+    await runJobWorker(key);
     return;
   }
 
@@ -105,10 +121,28 @@ async function printJson(value: unknown): Promise<void> {
 function usage(): void {
   console.error(`Usage:
   codexctl doctor --json
-  codexctl job start --repo . --key <key> --prompt <prompt> [--force] --json
+  codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] --json
   codexctl job status <key> --json
   codexctl job events <key> --json
+  codexctl job watch <key> --json
+  codexctl job steer <key> --prompt <prompt> --json
   codexctl job result <key> --json`);
+}
+
+async function watchJob(key: string): Promise<void> {
+  let offset = 0;
+  while (true) {
+    const next = await readNewEventLines(key, offset);
+    offset = next.offset;
+    for (const line of next.lines) {
+      console.log(line);
+    }
+    const job = await readJob(key);
+    if (job.status === "completed" || job.status === "failed") {
+      return;
+    }
+    await Bun.sleep(500);
+  }
 }
 
 main(Bun.argv.slice(2)).catch((error) => {

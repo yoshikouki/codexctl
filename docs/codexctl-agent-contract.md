@@ -28,8 +28,11 @@ All commands support `--json`. Machine callers should use it.
 ```sh
 codexctl doctor --json
 codexctl job start --repo . --key demo --prompt "Respond exactly: ok" --json
+codexctl job start --detach --repo . --key demo --prompt "Respond exactly: ok" --json
 codexctl job status demo --json
 codexctl job events demo --json
+codexctl job watch demo --json
+codexctl job steer demo --prompt "Narrow the answer." --json
 codexctl job result demo --json
 ```
 
@@ -37,16 +40,21 @@ codexctl job result demo --json
 
 `job start` launches `codex app-server --stdio`, sends newline-delimited JSON-RPC, starts a thread, starts a turn, records server notifications, and exits when `turn/completed` arrives for that turn.
 
+`job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
+
 Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local job records are not overwritten unless callers pass `--force`.
 
 The persisted files live in `.codexctl/jobs/<job-key>/`:
 
 - `job.json`: latest job state.
 - `events.jsonl`: JSON Lines event log.
+- `control.jsonl`: append-only command inbox for steering.
+- `worker.log`: detached worker stdout.
+- `worker.err.log`: detached worker stderr.
 
 ## Future Async Semantics
 
-A later supervisor can make `job start` return immediately and keep the app-server process alive. The command contract should remain job-key based:
+A later supervisor can replace the one-worker-per-job model. The command contract should remain job-key based:
 
 - `job watch` tails live or persisted events.
 - `job steer` sends input to the active thread.

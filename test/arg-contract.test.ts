@@ -1,10 +1,51 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
-import { readJobEvents } from "../src/job.ts";
+import { createJob, enqueueSteer, readJobEvents } from "../src/job.ts";
 
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
     expect(await readJobEvents("missing-test-job")).toEqual([]);
+  });
+});
+
+describe("job control files", () => {
+  test("createJob initializes control and event logs", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "control-test", repo: ".", prompt: "hello" });
+      expect(await Bun.file(".codexctl/jobs/control-test/events.jsonl").text()).toBe("");
+      expect(await Bun.file(".codexctl/jobs/control-test/control.jsonl").text()).toBe("");
+      expect(await Bun.file(".codexctl/jobs/control-test/job.json").json()).toMatchObject({
+        key: "control-test",
+        status: "queued",
+      });
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("enqueueSteer appends a control command for running jobs", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "steer-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/steer-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      await Bun.write(jobPath, JSON.stringify(job));
+      const command = await enqueueSteer("steer-test", "adjust");
+      expect(command.type).toBe("turn.steer");
+      expect(await Bun.file(".codexctl/jobs/steer-test/control.jsonl").text()).toContain("adjust");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 
