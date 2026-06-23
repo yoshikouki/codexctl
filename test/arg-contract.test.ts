@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
-import { createJob, enqueueApprovalDecision, enqueueSteer, readApprovals, readJobEvents, recoverJob } from "../src/job.ts";
+import {
+  createJob,
+  enqueueApprovalDecision,
+  enqueueSteer,
+  readApprovals,
+  readJobEvents,
+  readNewEventLines,
+  recoverJob,
+} from "../src/job.ts";
 
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
@@ -34,6 +42,30 @@ describe("event store", () => {
       expect(command.type).toBe("approval.resolve");
       expect(await readApprovals("approval-test")).toHaveLength(1);
       expect(await Bun.file(".codexctl/jobs/approval-test/control.jsonl").text()).toContain("approval.resolve");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("readNewEventLines consumes only complete lines using byte offsets", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "tail-test", repo: ".", prompt: "hello" });
+      const path = ".codexctl/jobs/tail-test/events.jsonl";
+      const first = JSON.stringify({ message: "日本語" }) + "\n";
+      const second = JSON.stringify({ message: "next" }) + "\n";
+      await Bun.write(path, first + second.slice(0, -1));
+      const firstRead = await readNewEventLines("tail-test", 0);
+      expect(firstRead.lines).toEqual([first.trimEnd()]);
+      expect(firstRead.offset).toBe(new TextEncoder().encode(first).byteLength);
+
+      await Bun.write(path, first + second);
+      const secondRead = await readNewEventLines("tail-test", firstRead.offset);
+      expect(secondRead.lines).toEqual([second.trimEnd()]);
+      expect(secondRead.offset).toBe(new TextEncoder().encode(first + second).byteLength);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

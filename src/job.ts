@@ -327,13 +327,7 @@ export async function enqueueApprovalDecision(
 
 export async function readNewEventLines(key: string, offset: number): Promise<{ lines: string[]; offset: number }> {
   const path = `${jobDir(process.cwd(), key)}/events.jsonl`;
-  const file = Bun.file(path);
-  if (!(await file.exists())) return { lines: [], offset };
-  const text = await file.text();
-  if (offset > text.length) offset = 0;
-  const chunk = text.slice(offset);
-  const lines = chunk.split("\n").filter((line) => line.trim().length > 0);
-  return { lines, offset: text.length };
+  return await readNewCompleteLines(path, offset);
 }
 
 async function waitForTurnCompletion(
@@ -342,8 +336,9 @@ async function waitForTurnCompletion(
   dir: string,
   processedControlIds: Set<string>,
 ): Promise<void> {
+  let controlOffset = 0;
   while (record.status === "running") {
-    await processControlCommands(record, client, dir, processedControlIds);
+    controlOffset = await processControlCommands(record, client, dir, processedControlIds, controlOffset);
     await Bun.sleep(250);
   }
   if (record.status === "failed") {
@@ -412,12 +407,10 @@ async function processControlCommands(
   client: AppServerClient,
   dir: string,
   processedControlIds: Set<string>,
-): Promise<void> {
-  const file = Bun.file(`${dir}/control.jsonl`);
-  if (!(await file.exists())) return;
-  const text = await file.text();
-  for (const line of text.split("\n")) {
-    if (line.trim().length === 0) continue;
+  offset: number,
+): Promise<number> {
+  const result = await readNewCompleteLines(`${dir}/control.jsonl`, offset);
+  for (const line of result.lines) {
     const command = JSON.parse(line) as ControlCommand;
     if (processedControlIds.has(command.id)) continue;
     processedControlIds.add(command.id);
@@ -450,6 +443,7 @@ async function processControlCommands(
       await resolveApprovalCommand(record, client, dir, command);
     }
   }
+  return result.offset;
 }
 
 async function resolveApprovalCommand(
@@ -576,6 +570,26 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 async function appendEvent(dir: string, event: AppServerEvent): Promise<void> {
   await appendFile(`${dir}/events.jsonl`, JSON.stringify(event) + "\n");
+}
+
+async function readNewCompleteLines(path: string, offset: number): Promise<{ lines: string[]; offset: number }> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return { lines: [], offset };
+  const size = file.size;
+  if (offset > size) offset = 0;
+  if (offset === size) return { lines: [], offset };
+
+  const chunk = await file.slice(offset, size).text();
+  const lastNewline = chunk.lastIndexOf("\n");
+  if (lastNewline < 0) return { lines: [], offset };
+
+  const consumed = chunk.slice(0, lastNewline + 1);
+  return {
+    lines: consumed
+      .split("\n")
+      .filter((line) => line.trim().length > 0),
+    offset: offset + new TextEncoder().encode(consumed).byteLength,
+  };
 }
 
 async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
