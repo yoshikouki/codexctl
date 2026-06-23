@@ -3,6 +3,7 @@ import { readDaemonVersion } from "./app-server.ts";
 import {
   enqueueApprovalDecision,
   enqueueSteer,
+  listJobs,
   readApproval,
   readApprovals,
   readJob,
@@ -11,6 +12,7 @@ import {
   recoverJob,
   runJobWorker,
   startJob,
+  sweepJobs,
 } from "./job.ts";
 
 type Args = {
@@ -41,6 +43,11 @@ async function main(argv: string[]): Promise<void> {
     const force = booleanFlag(args, "force");
     const detach = booleanFlag(args, "detach");
     await printJson(await startJob({ key: jobKey, repo, prompt, model, approvalPolicy, sandbox, force, detach }));
+    return;
+  }
+
+  if (resource === "job" && action === "list") {
+    await printJson(await listJobs());
     return;
   }
 
@@ -81,6 +88,11 @@ async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "recover" && key) {
     await printJson(await recoverJob(key));
+    return;
+  }
+
+  if (resource === "job" && action === "sweep") {
+    await printJson(await sweepJobs());
     return;
   }
 
@@ -174,11 +186,13 @@ function usage(): void {
   console.error(`Usage:
   codexctl doctor --json
   codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
+  codexctl job list --json
   codexctl job status <key> --json
   codexctl job events <key> --json
   codexctl job watch <key> --json
   codexctl job steer <key> --prompt <prompt> --json
   codexctl job recover <key> --json
+  codexctl job sweep --json
   codexctl approval list <job-key> [--all] --json
   codexctl approval show <job-key> <approval-id> --json
   codexctl approval approve <job-key> <approval-id> [--for-session] --json

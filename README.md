@@ -9,9 +9,11 @@ This repository starts with a small Bun-based proof of concept:
 - `codexctl job start --detach --repo . --key demo --prompt "..." --json` starts a detached worker.
 - `codexctl job start --approval-policy untrusted ...` asks app-server to route more actions through approval.
 - `codexctl job start --sandbox read-only ...` overrides the app-server sandbox mode for that job.
+- `codexctl job list --json` summarizes local job records.
 - `codexctl job watch demo --json` follows the event log until the job is terminal.
 - `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
 - `codexctl job recover demo --json` reconciles a queued or stale running job.
+- `codexctl job sweep --json` reconciles all queued or running local jobs.
 - `codexctl approval list demo --json` lists pending approval requests.
 - `codexctl approval approve demo <approval-id> --json` resolves a pending approval.
 - `codexctl job result demo --json` reads the persisted result.

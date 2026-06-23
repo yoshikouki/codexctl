@@ -30,11 +30,13 @@ codexctl doctor --json
 codexctl job start --repo . --key demo --prompt "Respond exactly: ok" --json
 codexctl job start --detach --repo . --key demo --prompt "Respond exactly: ok" --json
 codexctl job start --detach --approval-policy untrusted --sandbox read-only --repo . --key demo --prompt "Run pwd" --json
+codexctl job list --json
 codexctl job status demo --json
 codexctl job events demo --json
 codexctl job watch demo --json
 codexctl job steer demo --prompt "Narrow the answer." --json
 codexctl job recover demo --json
+codexctl job sweep --json
 codexctl approval list demo --json
 codexctl approval show demo <approval-id> --json
 codexctl approval approve demo <approval-id> --json
@@ -49,6 +51,8 @@ codexctl job result demo --json
 `job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
 
 `job recover` reconciles persisted state with the detached worker. Queued jobs and jobs whose worker died before app-server thread creation are restarted. Jobs with an in-flight `threadId` / `turnId` are marked failed if their worker process is gone, because the current stdio app-server session cannot be safely resumed without risking duplicate execution.
+
+`job list` summarizes local job records. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
 Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local job records are not overwritten unless callers pass `--force`.
 

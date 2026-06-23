@@ -1,5 +1,5 @@
-import { appendFile, mkdir } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { appendFile, mkdir, readdir } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed";
@@ -72,6 +72,17 @@ export type JobRecoveryResult = {
   job: JobRecord;
 };
 
+export type JobListItem = {
+  key: string;
+  status: JobStatus | "unreadable";
+  updatedAt: string | null;
+  workerPid: number | null;
+  threadId: string | null;
+  turnId: string | null;
+  pendingApprovals: number;
+  error: string | null;
+};
+
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
   if (options.detach) {
@@ -108,6 +119,41 @@ export async function recoverJob(key: string): Promise<JobRecoveryResult> {
     at: new Date().toISOString(),
   });
   return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: record };
+}
+
+export async function listJobs(): Promise<JobListItem[]> {
+  const root = jobsRoot(process.cwd());
+  const entries = await readJobRootEntries(root);
+  const jobs = await Promise.all(entries
+    .filter((entry) => entry.isDirectory())
+    .map(async (entry): Promise<JobListItem> => {
+      try {
+        const job = normalizeJobRecord(await Bun.file(join(root, entry.name, "job.json")).json(), entry.name);
+        return summarizeJob(job);
+      } catch (error) {
+        return {
+          key: entry.name,
+          status: "unreadable",
+          updatedAt: null,
+          workerPid: null,
+          threadId: null,
+          turnId: null,
+          pendingApprovals: 0,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }));
+  return jobs.sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+}
+
+export async function sweepJobs(): Promise<JobRecoveryResult[]> {
+  const jobs = await listJobs();
+  const results: JobRecoveryResult[] = [];
+  for (const job of jobs) {
+    if (job.status !== "queued" && job.status !== "running") continue;
+    results.push(await recoverJob(job.key));
+  }
+  return results;
 }
 
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
@@ -248,7 +294,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 
 export async function readJob(key: string): Promise<JobRecord> {
   const path = `${jobDir(process.cwd(), key)}/job.json`;
-  return await Bun.file(path).json() as JobRecord;
+  return normalizeJobRecord(await Bun.file(path).json(), key);
 }
 
 export async function readJobEvents(key: string): Promise<unknown[]> {
@@ -597,8 +643,69 @@ async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
   await Bun.write(`${dir}/job.json`, JSON.stringify(record, null, 2) + "\n");
 }
 
+function summarizeJob(job: JobRecord): JobListItem {
+  return {
+    key: job.key,
+    status: job.status,
+    updatedAt: job.updatedAt,
+    workerPid: job.workerPid,
+    threadId: job.threadId,
+    turnId: job.turnId,
+    pendingApprovals: job.approvals.filter((approval) => approval.status === "pending").length,
+    error: job.error,
+  };
+}
+
+function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
+  if (!isObject(value)) throw new Error("job.json did not contain an object");
+  const now = new Date().toISOString();
+  const status = value.status === "queued" || value.status === "running" || value.status === "completed" || value.status === "failed"
+    ? value.status
+    : "failed";
+  return {
+    key: typeof value.key === "string" ? value.key : fallbackKey,
+    repo: typeof value.repo === "string" ? value.repo : process.cwd(),
+    prompt: typeof value.prompt === "string" ? value.prompt : "",
+    model: typeof value.model === "string" ? value.model : null,
+    approvalPolicy: isApprovalPolicy(value.approvalPolicy) ? value.approvalPolicy : "on-request",
+    sandbox: isSandbox(value.sandbox) ? value.sandbox : null,
+    status,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : now,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : now,
+    startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+    completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
+    workerPid: typeof value.workerPid === "number" ? value.workerPid : null,
+    threadId: typeof value.threadId === "string" ? value.threadId : null,
+    turnId: typeof value.turnId === "string" ? value.turnId : null,
+    approvals: Array.isArray(value.approvals) ? value.approvals as ApprovalRecord[] : [],
+    finalResponse: typeof value.finalResponse === "string" ? value.finalResponse : "",
+    error: typeof value.error === "string" ? value.error : null,
+  };
+}
+
+function isApprovalPolicy(value: unknown): value is JobRecord["approvalPolicy"] {
+  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
+}
+
+function isSandbox(value: unknown): value is NonNullable<JobRecord["sandbox"]> {
+  return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
+}
+
+async function readJobRootEntries(root: string) {
+  try {
+    return await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (isErrorWithCode(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 function normalizeRepo(repo: string): string {
   return isAbsolute(repo) ? repo : resolve(process.cwd(), repo);
+}
+
+function jobsRoot(root: string): string {
+  return join(root, ".codexctl", "jobs");
 }
 
 function isProcessAlive(pid: number | null): boolean {
@@ -609,4 +716,8 @@ function isProcessAlive(pid: number | null): boolean {
   } catch {
     return false;
   }
+}
+
+function isErrorWithCode(value: unknown): value is { code: string } {
+  return typeof value === "object" && value !== null && "code" in value;
 }

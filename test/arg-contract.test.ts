@@ -6,10 +6,12 @@ import {
   createJob,
   enqueueApprovalDecision,
   enqueueSteer,
+  listJobs,
   readApprovals,
   readJobEvents,
   readNewEventLines,
   recoverJob,
+  sweepJobs,
 } from "../src/job.ts";
 
 describe("event store", () => {
@@ -129,6 +131,61 @@ describe("job control files", () => {
       expect(result.job.status).toBe("failed");
       expect(result.job.error).toContain("cannot be resumed");
       expect(await Bun.file(".codexctl/jobs/recover-test/events.jsonl").text()).toContain("recovery.failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("listJobs summarizes jobs and sweepJobs recovers active jobs", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "completed-job", repo: ".", prompt: "hello" });
+      await createJob({ key: "legacy-job", repo: ".", prompt: "hello" });
+      await createJob({ key: "stale-job", repo: ".", prompt: "hello" });
+
+      const completedPath = ".codexctl/jobs/completed-job/job.json";
+      const completed = await Bun.file(completedPath).json();
+      completed.status = "completed";
+      completed.completedAt = new Date().toISOString();
+      completed.approvals.push({
+        id: "1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: {},
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(completedPath, JSON.stringify(completed));
+
+      const legacyPath = ".codexctl/jobs/legacy-job/job.json";
+      const legacy = await Bun.file(legacyPath).json();
+      legacy.status = "completed";
+      delete legacy.approvals;
+      await Bun.write(legacyPath, JSON.stringify(legacy));
+
+      const stalePath = ".codexctl/jobs/stale-job/job.json";
+      const stale = await Bun.file(stalePath).json();
+      stale.status = "running";
+      stale.workerPid = null;
+      stale.threadId = "thread-1";
+      stale.turnId = "turn-1";
+      await Bun.write(stalePath, JSON.stringify(stale));
+
+      const jobs = await listJobs();
+      expect(jobs.map((job) => job.key).sort()).toEqual(["completed-job", "legacy-job", "stale-job"]);
+      expect(jobs.find((job) => job.key === "completed-job")?.pendingApprovals).toBe(1);
+      expect(jobs.find((job) => job.key === "legacy-job")?.pendingApprovals).toBe(0);
+
+      const sweep = await sweepJobs();
+      expect(sweep).toHaveLength(1);
+      expect(sweep[0]?.job.key).toBe("stale-job");
+      expect(sweep[0]?.action).toBe("failed");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
