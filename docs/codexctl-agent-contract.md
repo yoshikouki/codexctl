@@ -34,6 +34,7 @@ codexctl job status demo --json
 codexctl job events demo --json
 codexctl job watch demo --json
 codexctl job steer demo --prompt "Narrow the answer." --json
+codexctl job recover demo --json
 codexctl approval list demo --json
 codexctl approval show demo <approval-id> --json
 codexctl approval approve demo <approval-id> --json
@@ -46,6 +47,8 @@ codexctl job result demo --json
 `job start` launches `codex app-server --stdio`, sends newline-delimited JSON-RPC, starts a thread, starts a turn, records server notifications, and exits when `turn/completed` arrives for that turn.
 
 `job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
+
+`job recover` reconciles persisted state with the detached worker. Queued jobs and jobs whose worker died before app-server thread creation are restarted. Jobs with an in-flight `threadId` / `turnId` are marked failed if their worker process is gone, because the current stdio app-server session cannot be safely resumed without risking duplicate execution.
 
 Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local job records are not overwritten unless callers pass `--force`.
 
@@ -70,4 +73,5 @@ A later supervisor can replace the one-worker-per-job model. The command contrac
 ## Known Gaps
 
 - `item/permissions/requestApproval` is listed but not yet safely resolvable because its response schema is not a simple accept/decline decision.
-- The app-server process is per-command in the PoC; long-running jobs need a supervisor.
+- In-flight app-server stdio sessions cannot yet be resumed after worker loss; `job recover` marks them failed rather than replaying the prompt.
+- The app-server process is still one worker-owned stdio process per active job; long-running jobs need a supervisor.

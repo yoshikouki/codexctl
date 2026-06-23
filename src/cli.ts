@@ -8,6 +8,7 @@ import {
   readJob,
   readJobEvents,
   readNewEventLines,
+  recoverJob,
   runJobWorker,
   startJob,
 } from "./job.ts";
@@ -75,6 +76,11 @@ async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "steer" && key) {
     await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
+    return;
+  }
+
+  if (resource === "job" && action === "recover" && key) {
+    await printJson(await recoverJob(key));
     return;
   }
 
@@ -172,6 +178,7 @@ function usage(): void {
   codexctl job events <key> --json
   codexctl job watch <key> --json
   codexctl job steer <key> --prompt <prompt> --json
+  codexctl job recover <key> --json
   codexctl approval list <job-key> [--all] --json
   codexctl approval show <job-key> <approval-id> --json
   codexctl approval approve <job-key> <approval-id> [--for-session] --json

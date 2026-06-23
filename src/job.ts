@@ -66,26 +66,48 @@ export type StartJobOptions = {
   detach?: boolean;
 };
 
+export type JobRecoveryResult = {
+  action: "none" | "restarted" | "failed";
+  reason: string;
+  job: JobRecord;
+};
+
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
   if (options.detach) {
     const dir = jobDir(process.cwd(), record.key);
-    const proc = Bun.spawn({
-      cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", record.key],
-      cwd: process.cwd(),
-      stdin: "ignore",
-      stdout: Bun.file(`${dir}/worker.log`),
-      stderr: Bun.file(`${dir}/worker.err.log`),
-      detached: true,
-    });
-    proc.unref();
-    record.status = "running";
-    record.workerPid = proc.pid;
-    record.updatedAt = new Date().toISOString();
-    await writeJobRecord(dir, record);
-    return record;
+    return await spawnDetachedWorker(record, dir, "start");
   }
   return await runJobWorker(record.key);
+}
+
+export async function recoverJob(key: string): Promise<JobRecoveryResult> {
+  const dir = jobDir(process.cwd(), key);
+  const record = await readJob(key);
+  if (record.status === "completed" || record.status === "failed") {
+    return { action: "none", reason: `job is already ${record.status}`, job: record };
+  }
+  if (record.status === "queued") {
+    return { action: "restarted", reason: "queued job had no worker", job: await spawnDetachedWorker(record, dir, "recover") };
+  }
+  if (isProcessAlive(record.workerPid)) {
+    return { action: "none", reason: `worker ${record.workerPid} is alive`, job: record };
+  }
+  if (!record.threadId && !record.turnId) {
+    return { action: "restarted", reason: "worker died before starting a thread", job: await spawnDetachedWorker(record, dir, "recover") };
+  }
+
+  record.status = "failed";
+  record.error = "worker process is not alive; in-flight app-server stdio sessions cannot be resumed";
+  record.completedAt = new Date().toISOString();
+  record.updatedAt = new Date().toISOString();
+  await writeJobRecord(dir, record);
+  await appendEvent(dir, {
+    direction: "worker",
+    event: { type: "recovery.failed", reason: "in_flight_stdio_session_not_resumable", workerPid: record.workerPid },
+    at: new Date().toISOString(),
+  });
+  return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: record };
 }
 
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
@@ -122,6 +144,29 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
     error: null,
   };
   await writeJobRecord(dir, record);
+  return record;
+}
+
+async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "start" | "recover"): Promise<JobRecord> {
+  const proc = Bun.spawn({
+    cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", record.key],
+    cwd: process.cwd(),
+    stdin: "ignore",
+    stdout: Bun.file(`${dir}/worker.log`),
+    stderr: Bun.file(`${dir}/worker.err.log`),
+    detached: true,
+  });
+  proc.unref();
+  record.status = "running";
+  record.workerPid = proc.pid;
+  record.completedAt = null;
+  record.updatedAt = new Date().toISOString();
+  await writeJobRecord(dir, record);
+  await appendEvent(dir, {
+    direction: "worker",
+    event: { type: "worker.spawned", pid: proc.pid, reason },
+    at: new Date().toISOString(),
+  });
   return record;
 }
 
@@ -540,4 +585,14 @@ async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
 
 function normalizeRepo(repo: string): string {
   return isAbsolute(repo) ? repo : resolve(process.cwd(), repo);
+}
+
+function isProcessAlive(pid: number | null): boolean {
+  if (pid === null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

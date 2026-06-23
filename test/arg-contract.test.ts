@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
-import { createJob, enqueueApprovalDecision, enqueueSteer, readApprovals, readJobEvents } from "../src/job.ts";
+import { createJob, enqueueApprovalDecision, enqueueSteer, readApprovals, readJobEvents, recoverJob } from "../src/job.ts";
 
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
@@ -73,6 +73,30 @@ describe("job control files", () => {
       const command = await enqueueSteer("steer-test", "adjust");
       expect(command.type).toBe("turn.steer");
       expect(await Bun.file(".codexctl/jobs/steer-test/control.jsonl").text()).toContain("adjust");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("recoverJob fails in-flight jobs whose worker is gone", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "recover-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/recover-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+      const result = await recoverJob("recover-test");
+      expect(result.action).toBe("failed");
+      expect(result.job.status).toBe("failed");
+      expect(result.job.error).toContain("cannot be resumed");
+      expect(await Bun.file(".codexctl/jobs/recover-test/events.jsonl").text()).toContain("recovery.failed");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

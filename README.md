@@ -11,6 +11,7 @@ This repository starts with a small Bun-based proof of concept:
 - `codexctl job start --sandbox read-only ...` overrides the app-server sandbox mode for that job.
 - `codexctl job watch demo --json` follows the event log until the job is terminal.
 - `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
+- `codexctl job recover demo --json` reconciles a queued or stale running job.
 - `codexctl approval list demo --json` lists pending approval requests.
 - `codexctl approval approve demo <approval-id> --json` resolves a pending approval.
 - `codexctl job result demo --json` reads the persisted result.
