@@ -29,10 +29,15 @@ All commands support `--json`. Machine callers should use it.
 codexctl doctor --json
 codexctl job start --repo . --key demo --prompt "Respond exactly: ok" --json
 codexctl job start --detach --repo . --key demo --prompt "Respond exactly: ok" --json
+codexctl job start --detach --approval-policy untrusted --sandbox read-only --repo . --key demo --prompt "Run pwd" --json
 codexctl job status demo --json
 codexctl job events demo --json
 codexctl job watch demo --json
 codexctl job steer demo --prompt "Narrow the answer." --json
+codexctl approval list demo --json
+codexctl approval show demo <approval-id> --json
+codexctl approval approve demo <approval-id> --json
+codexctl approval reject demo <approval-id> --json
 codexctl job result demo --json
 ```
 
@@ -52,6 +57,8 @@ The persisted files live in `.codexctl/jobs/<job-key>/`:
 - `worker.log`: detached worker stdout.
 - `worker.err.log`: detached worker stderr.
 
+Approval server requests are copied into `job.json.approvals`. Approval decisions are appended to `control.jsonl`; the worker translates them into the correct JSON-RPC response for supported app-server methods.
+
 ## Future Async Semantics
 
 A later supervisor can replace the one-worker-per-job model. The command contract should remain job-key based:
@@ -62,5 +69,5 @@ A later supervisor can replace the one-worker-per-job model. The command contrac
 
 ## Known Gaps
 
-- Approval requests are persisted as raw server events, but there is not yet a first-class `approval` command set.
+- `item/permissions/requestApproval` is listed but not yet safely resolvable because its response schema is not a simple accept/decline decision.
 - The app-server process is per-command in the PoC; long-running jobs need a supervisor.

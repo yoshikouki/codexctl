@@ -2,11 +2,42 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
-import { createJob, enqueueSteer, readJobEvents } from "../src/job.ts";
+import { createJob, enqueueApprovalDecision, enqueueSteer, readApprovals, readJobEvents } from "../src/job.ts";
 
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
     expect(await readJobEvents("missing-test-job")).toEqual([]);
+  });
+
+  test("enqueueApprovalDecision appends an approval resolve command", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "approval-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/approval-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.approvals.push({
+        id: "1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: { command: "true" },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+      const command = await enqueueApprovalDecision("approval-test", "1", "approve");
+      expect(command.type).toBe("approval.resolve");
+      expect(await readApprovals("approval-test")).toHaveLength(1);
+      expect(await Bun.file(".codexctl/jobs/approval-test/control.jsonl").text()).toContain("approval.resolve");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 

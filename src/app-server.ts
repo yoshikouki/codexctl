@@ -24,14 +24,24 @@ export type JsonRpcResponse = {
   };
 };
 
+export type JsonRpcClientResponse = {
+  id: string | number;
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+};
+
 export type JsonRpcServerRequest = {
-  id: number;
+  id: string | number;
   method: string;
   params?: unknown;
 };
 
 export type AppServerEvent =
-  | { direction: "client"; message: JsonRpcRequest | JsonRpcNotification; at: string }
+  | { direction: "client"; message: JsonRpcRequest | JsonRpcNotification | JsonRpcClientResponse; at: string }
   | { direction: "server"; message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest; at: string }
   | { direction: "worker"; event: JsonObject; at: string }
   | { direction: "control"; command: JsonObject; at: string };
@@ -105,6 +115,12 @@ export class AppServerClient {
 
   async notify(method: string, params?: unknown): Promise<void> {
     const message: JsonRpcNotification = params === undefined ? { method } : { method, params };
+    await this.#emit({ direction: "client", message, at: new Date().toISOString() });
+    this.#proc.stdin.write(JSON.stringify(message) + "\n");
+  }
+
+  async respond(id: string | number, result: unknown): Promise<void> {
+    const message: JsonRpcClientResponse = { id, result };
     await this.#emit({ direction: "client", message, at: new Date().toISOString() });
     this.#proc.stdin.write(JSON.stringify(message) + "\n");
   }

@@ -9,6 +9,8 @@ export type JobRecord = {
   repo: string;
   prompt: string;
   model: string | null;
+  approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
+  sandbox: "read-only" | "workspace-write" | "danger-full-access" | null;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
@@ -17,22 +19,49 @@ export type JobRecord = {
   workerPid: number | null;
   threadId: string | null;
   turnId: string | null;
+  approvals: ApprovalRecord[];
   finalResponse: string;
   error: string | null;
 };
 
-export type ControlCommand = {
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled" | "unsupported";
+
+export type ApprovalRecord = {
+  id: string;
+  serverRequestId: string | number;
+  method: string;
+  params: unknown;
+  status: ApprovalStatus;
+  createdAt: string;
+  resolvedAt: string | null;
+  decision: string | null;
+  error: string | null;
+};
+
+export type TurnSteerCommand = {
   id: string;
   type: "turn.steer";
   at: string;
   input: Array<{ type: "text"; text: string }>;
 };
 
+export type ApprovalResolveCommand = {
+  id: string;
+  type: "approval.resolve";
+  at: string;
+  approvalId: string;
+  decision: "approve" | "approveForSession" | "reject" | "cancel";
+};
+
+export type ControlCommand = TurnSteerCommand | ApprovalResolveCommand;
+
 export type StartJobOptions = {
   key: string;
   repo: string;
   prompt: string;
   model?: string;
+  approvalPolicy?: JobRecord["approvalPolicy"];
+  sandbox?: NonNullable<JobRecord["sandbox"]>;
   force?: boolean;
   detach?: boolean;
 };
@@ -78,6 +107,8 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
     repo,
     prompt: options.prompt,
     model: options.model ?? null,
+    approvalPolicy: options.approvalPolicy ?? "on-request",
+    sandbox: options.sandbox ?? null,
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -86,6 +117,7 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
     workerPid: null,
     threadId: null,
     turnId: null,
+    approvals: [],
     finalResponse: "",
     error: null,
   };
@@ -121,7 +153,8 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
       runtimeWorkspaceRoots: [record.repo],
       model: record.model,
       approvalsReviewer: "user",
-      approvalPolicy: "on-request",
+      approvalPolicy: record.approvalPolicy,
+      sandbox: record.sandbox,
       threadSource: "other",
     }) as { thread?: { id?: string } };
     const threadId = threadResult.thread?.id;
@@ -205,6 +238,48 @@ export async function enqueueSteer(key: string, prompt: string): Promise<Control
   return command;
 }
 
+export async function readApprovals(key: string, includeResolved = false): Promise<ApprovalRecord[]> {
+  const job = await readJob(key);
+  return includeResolved ? job.approvals : job.approvals.filter((approval) => approval.status === "pending");
+}
+
+export async function readApproval(key: string, approvalId: string): Promise<ApprovalRecord> {
+  const approval = (await readApprovals(key, true)).find((candidate) => candidate.id === approvalId);
+  if (!approval) throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+  return approval;
+}
+
+export async function enqueueApprovalDecision(
+  key: string,
+  approvalId: string,
+  decision: ApprovalResolveCommand["decision"],
+): Promise<ApprovalResolveCommand> {
+  const dir = jobDir(process.cwd(), key);
+  const job = await readJob(key);
+  if (job.status !== "running") {
+    throw new Error(`Job '${key}' is ${job.status}; only running jobs can receive approval decisions`);
+  }
+  const approval = job.approvals.find((candidate) => candidate.id === approvalId);
+  if (!approval) throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+  if (approval.status !== "pending") {
+    throw new Error(`Approval '${approvalId}' is already ${approval.status}`);
+  }
+  const command: ApprovalResolveCommand = {
+    id: crypto.randomUUID(),
+    type: "approval.resolve",
+    at: new Date().toISOString(),
+    approvalId,
+    decision,
+  };
+  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  await appendEvent(dir, {
+    direction: "control",
+    command,
+    at: new Date().toISOString(),
+  });
+  return command;
+}
+
 export async function readNewEventLines(key: string, offset: number): Promise<{ lines: string[]; offset: number }> {
   const path = `${jobDir(process.cwd(), key)}/events.jsonl`;
   const file = Bun.file(path);
@@ -234,6 +309,19 @@ async function waitForTurnCompletion(
 function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
   if (event.direction !== "server" || !("method" in event.message)) return;
   const { method, params } = event.message;
+  if ("id" in event.message && isApprovalRequest(method)) {
+    upsertApproval(record, {
+      id: String(event.message.id),
+      serverRequestId: event.message.id,
+      method,
+      params,
+      status: "pending",
+      createdAt: event.at,
+      resolvedAt: null,
+      decision: null,
+      error: null,
+    });
+  }
   if (method === "thread/started") {
     const threadId = getNestedString(params, ["thread", "id"]);
     if (threadId) record.threadId = threadId;
@@ -313,6 +401,118 @@ async function processControlCommands(
         at: new Date().toISOString(),
       });
     }
+    if (command.type === "approval.resolve") {
+      await resolveApprovalCommand(record, client, dir, command);
+    }
+  }
+}
+
+async function resolveApprovalCommand(
+  record: JobRecord,
+  client: AppServerClient,
+  dir: string,
+  command: ApprovalResolveCommand,
+): Promise<void> {
+  const approval = record.approvals.find((candidate) => candidate.id === command.approvalId);
+  if (!approval || approval.status !== "pending") {
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "approval.rejected", commandId: command.id, approvalId: command.approvalId, reason: "not_pending" },
+      at: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const result = approvalResponseFor(approval, command.decision);
+  if (!result.supported) {
+    approval.status = "unsupported";
+    approval.error = result.error;
+    approval.resolvedAt = new Date().toISOString();
+    approval.decision = command.decision;
+    record.updatedAt = new Date().toISOString();
+    await writeJobRecord(dir, record);
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "approval.unsupported", commandId: command.id, approvalId: approval.id, method: approval.method, error: result.error },
+      at: new Date().toISOString(),
+    });
+    return;
+  }
+
+  await client.respond(approval.serverRequestId, result.response);
+  approval.status = command.decision === "cancel" ? "cancelled" : command.decision.startsWith("approve") ? "approved" : "rejected";
+  approval.decision = command.decision;
+  approval.resolvedAt = new Date().toISOString();
+  record.updatedAt = new Date().toISOString();
+  await writeJobRecord(dir, record);
+  await appendEvent(dir, {
+    direction: "worker",
+    event: { type: "approval.resolved", commandId: command.id, approvalId: approval.id, decision: command.decision },
+    at: new Date().toISOString(),
+  });
+}
+
+function approvalResponseFor(
+  approval: ApprovalRecord,
+  decision: ApprovalResolveCommand["decision"],
+): { supported: true; response: unknown } | { supported: false; error: string } {
+  if (approval.method === "item/commandExecution/requestApproval") {
+    return { supported: true, response: { decision: modernApprovalDecision(approval, decision) } };
+  }
+  if (approval.method === "item/fileChange/requestApproval") {
+    return { supported: true, response: { decision: modernApprovalDecision(approval, decision) } };
+  }
+  if (approval.method === "execCommandApproval" || approval.method === "applyPatchApproval") {
+    return { supported: true, response: { decision: legacyApprovalDecision(decision) } };
+  }
+  return { supported: false, error: `Approval method '${approval.method}' is not supported yet` };
+}
+
+function modernApprovalDecision(approval: ApprovalRecord, decision: ApprovalResolveCommand["decision"]): unknown {
+  if (decision === "approve") return "accept";
+  if (decision === "approveForSession") return sessionApprovalDecision(approval.params) ?? "acceptForSession";
+  if (decision === "cancel") return "cancel";
+  return "decline";
+}
+
+function sessionApprovalDecision(params: unknown): unknown | null {
+  if (!isObject(params)) return null;
+  const { availableDecisions, proposedExecpolicyAmendment } = params;
+  if (Array.isArray(availableDecisions)) {
+    const sessionDecision = availableDecisions.find((candidate) => isObject(candidate) && "acceptWithExecpolicyAmendment" in candidate);
+    if (sessionDecision) return sessionDecision;
+  }
+  if (Array.isArray(proposedExecpolicyAmendment)) {
+    return {
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: proposedExecpolicyAmendment,
+      },
+    };
+  }
+  return null;
+}
+
+function legacyApprovalDecision(decision: ApprovalResolveCommand["decision"]): string {
+  if (decision === "approve") return "approved";
+  if (decision === "approveForSession") return "approved_for_session";
+  if (decision === "cancel") return "abort";
+  return "denied";
+}
+
+function isApprovalRequest(method: string): boolean {
+  return method === "item/commandExecution/requestApproval"
+    || method === "item/fileChange/requestApproval"
+    || method === "item/permissions/requestApproval"
+    || method === "execCommandApproval"
+    || method === "applyPatchApproval";
+}
+
+function upsertApproval(record: JobRecord, approval: ApprovalRecord): void {
+  const index = record.approvals.findIndex((candidate) => candidate.id === approval.id);
+  if (index >= 0) {
+    record.approvals[index] = { ...record.approvals[index], ...approval };
+  } else {
+    record.approvals.push(approval);
   }
 }
 

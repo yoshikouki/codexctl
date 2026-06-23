@@ -1,6 +1,16 @@
 #!/usr/bin/env bun
 import { readDaemonVersion } from "./app-server.ts";
-import { enqueueSteer, readJob, readJobEvents, readNewEventLines, runJobWorker, startJob } from "./job.ts";
+import {
+  enqueueApprovalDecision,
+  enqueueSteer,
+  readApproval,
+  readApprovals,
+  readJob,
+  readJobEvents,
+  readNewEventLines,
+  runJobWorker,
+  startJob,
+} from "./job.ts";
 
 type Args = {
   positionals: string[];
@@ -9,7 +19,7 @@ type Args = {
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const [resource, action, key] = args.positionals;
+  const [resource, action, key, extra] = args.positionals;
 
   if (resource === "doctor") {
     await printJson({
@@ -25,9 +35,11 @@ async function main(argv: string[]): Promise<void> {
     const repo = stringFlag(args, "repo") ?? ".";
     const prompt = requiredString(args, "prompt");
     const model = stringFlag(args, "model") ?? undefined;
+    const approvalPolicy = approvalPolicyFlag(args);
+    const sandbox = sandboxFlag(args);
     const force = booleanFlag(args, "force");
     const detach = booleanFlag(args, "detach");
-    await printJson(await startJob({ key: jobKey, repo, prompt, model, force, detach }));
+    await printJson(await startJob({ key: jobKey, repo, prompt, model, approvalPolicy, sandbox, force, detach }));
     return;
   }
 
@@ -63,6 +75,26 @@ async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "steer" && key) {
     await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
+    return;
+  }
+
+  if (resource === "approval" && action === "list" && key) {
+    await printJson(await readApprovals(key, booleanFlag(args, "all")));
+    return;
+  }
+
+  if (resource === "approval" && action === "show" && key && extra) {
+    await printJson(await readApproval(key, extra));
+    return;
+  }
+
+  if (resource === "approval" && action === "approve" && key && extra) {
+    await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "for-session") ? "approveForSession" : "approve"));
+    return;
+  }
+
+  if (resource === "approval" && action === "reject" && key && extra) {
+    await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "cancel") ? "cancel" : "reject"));
     return;
   }
 
@@ -114,6 +146,20 @@ function requiredString(args: Args, name: string): string {
   return value;
 }
 
+function approvalPolicyFlag(args: Args): "untrusted" | "on-failure" | "on-request" | "never" | undefined {
+  const value = stringFlag(args, "approval-policy");
+  if (value === null) return undefined;
+  if (value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never") return value;
+  throw new Error("--approval-policy must be one of: untrusted, on-failure, on-request, never");
+}
+
+function sandboxFlag(args: Args): "read-only" | "workspace-write" | "danger-full-access" | undefined {
+  const value = stringFlag(args, "sandbox");
+  if (value === null) return undefined;
+  if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") return value;
+  throw new Error("--sandbox must be one of: read-only, workspace-write, danger-full-access");
+}
+
 async function printJson(value: unknown): Promise<void> {
   await Bun.write(Bun.stdout, JSON.stringify(value, null, 2) + "\n");
 }
@@ -121,11 +167,15 @@ async function printJson(value: unknown): Promise<void> {
 function usage(): void {
   console.error(`Usage:
   codexctl doctor --json
-  codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] --json
+  codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
   codexctl job status <key> --json
   codexctl job events <key> --json
   codexctl job watch <key> --json
   codexctl job steer <key> --prompt <prompt> --json
+  codexctl approval list <job-key> [--all] --json
+  codexctl approval show <job-key> <approval-id> --json
+  codexctl approval approve <job-key> <approval-id> [--for-session] --json
+  codexctl approval reject <job-key> <approval-id> [--cancel] --json
   codexctl job result <key> --json`);
 }
 
