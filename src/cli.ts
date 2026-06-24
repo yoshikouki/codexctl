@@ -20,7 +20,7 @@ import {
   sweepJobs,
   workerHealth,
 } from "./job.ts";
-import { readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
+import { planSupervisorActions, readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
 
 type Args = {
   positionals: string[];
@@ -228,6 +228,12 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "plan") {
+    allowFlags(args, ["json"]);
+    await printJson(await planSupervisorActions());
+    return;
+  }
+
   if (resource === "supervisor" && action === "run") {
     allowFlags(args, ["json", "interval-ms", "max-ticks"]);
     await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
@@ -413,6 +419,7 @@ function usageText(): string {
   codexctl approval approve <job-key> <approval-id> [--for-session] --json
   codexctl approval reject <job-key> <approval-id> [--cancel] --json
   codexctl supervisor once [--interval-ms <ms>] --json
+  codexctl supervisor plan --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json

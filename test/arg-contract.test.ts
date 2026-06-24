@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
@@ -20,7 +20,7 @@ import {
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
-import { readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
+import { planSupervisorActions, readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -899,6 +899,93 @@ describe("job control files", () => {
 });
 
 describe("supervisor", () => {
+  test("planSupervisorActions returns non-executing next action recommendations", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "approval-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "cancel-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "stale-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "dead-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "failed-plan", repo: ".", prompt: "hello" });
+      await mkdir(".codexctl/jobs/unreadable-plan", { recursive: true });
+      await Bun.write(".codexctl/jobs/unreadable-plan/job.json", "{not-json}\n");
+
+      const approval = await Bun.file(".codexctl/jobs/approval-plan/job.json").json();
+      approval.status = "running";
+      approval.workerPid = process.pid;
+      approval.workerHeartbeatAt = new Date().toISOString();
+      approval.approvals.push({
+        id: "1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: {},
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(".codexctl/jobs/approval-plan/job.json", JSON.stringify(approval));
+
+      const cancel = await Bun.file(".codexctl/jobs/cancel-plan/job.json").json();
+      cancel.status = "running";
+      cancel.workerPid = process.pid;
+      cancel.workerHeartbeatAt = new Date().toISOString();
+      cancel.threadId = "thread-1";
+      cancel.turnId = "turn-1";
+      await Bun.write(".codexctl/jobs/cancel-plan/job.json", JSON.stringify(cancel));
+      await cancelJob("cancel-plan");
+
+      const stale = await Bun.file(".codexctl/jobs/stale-plan/job.json").json();
+      stale.status = "running";
+      stale.workerPid = process.pid;
+      stale.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
+      await Bun.write(".codexctl/jobs/stale-plan/job.json", JSON.stringify(stale));
+
+      const dead = await Bun.file(".codexctl/jobs/dead-plan/job.json").json();
+      dead.status = "running";
+      dead.workerPid = null;
+      dead.threadId = "thread-1";
+      dead.turnId = "turn-1";
+      await Bun.write(".codexctl/jobs/dead-plan/job.json", JSON.stringify(dead));
+
+      const failed = await Bun.file(".codexctl/jobs/failed-plan/job.json").json();
+      failed.status = "failed";
+      failed.error = "boom";
+      await Bun.write(".codexctl/jobs/failed-plan/job.json", JSON.stringify(failed));
+
+      const plan = await planSupervisorActions();
+      expect(plan.health.total).toBe(6);
+      expect(plan.health.unreadable).toBe(1);
+      expect(plan.health.actionableApprovals).toBe(1);
+      expect(plan.health.waitingCancel).toBe(1);
+      expect(plan.health.staleWorkers).toBe(2);
+      expect(plan.health.deadWorkers).toBe(1);
+      expect(plan.health.inspectError).toBe(1);
+      expect(plan.actions.map((action) => action.kind).sort()).toEqual([
+        "inspect_dead_worker",
+        "inspect_error",
+        "inspect_stale_worker",
+        "inspect_unreadable",
+        "resolve_approval",
+        "wait_cancel",
+      ]);
+      expect(plan.actions.find((action) => action.kind === "resolve_approval")?.nextCommand).toBe("codexctl approval list approval-plan --json");
+      expect(plan.actions.find((action) => action.kind === "wait_cancel")?.severity).toBe("info");
+      expect(plan.actions.find((action) => action.kind === "inspect_dead_worker")?.nextCommand).toBe("codexctl job summary dead-plan --events 20 --json");
+      expect(plan.actions.find((action) => action.kind === "inspect_unreadable")?.severity).toBe("critical");
+
+      const cli = await runCli(["supervisor", "plan", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).actions).toHaveLength(6);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("runSupervisor once sweeps active jobs and records state", async () => {
     const cwd = process.cwd();
     const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
@@ -922,6 +1009,7 @@ describe("supervisor", () => {
       expect(state.lastTick?.health.failed).toBe(1);
       expect(state.lastTick?.health.inspectError).toBe(1);
       expect(state.lastTick?.health.deadWorkers).toBe(0);
+      expect(state.lastTick?.actions.map((action) => action.kind)).toEqual(["inspect_error"]);
       expect((await readSupervisorState()).tickCount).toBe(1);
       expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
       expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");

@@ -5,6 +5,7 @@ import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from ".
 export type SupervisorTick = {
   at: string;
   health: SupervisorHealthSummary;
+  actions: SupervisorAction[];
   recovered: JobRecoveryResult[];
 };
 
@@ -22,6 +23,14 @@ export type SupervisorHealthSummary = {
   actionableApprovals: number;
   waitingCancel: number;
   inspectError: number;
+};
+
+export type SupervisorAction = {
+  jobKey: string;
+  kind: "resolve_approval" | "wait_cancel" | "inspect_error" | "inspect_stale_worker" | "inspect_dead_worker" | "inspect_unreadable";
+  severity: "info" | "attention" | "critical";
+  reason: string;
+  nextCommand: string;
 };
 
 export type SupervisorState = {
@@ -106,12 +115,22 @@ export async function readSupervisorEvents(): Promise<unknown[]> {
     .map((line) => JSON.parse(line) as unknown);
 }
 
+export async function planSupervisorActions(): Promise<{ at: string; health: SupervisorHealthSummary; actions: SupervisorAction[] }> {
+  const jobs = await listJobs();
+  return {
+    at: new Date().toISOString(),
+    health: summarizeJobHealth(jobs),
+    actions: planJobActions(jobs),
+  };
+}
+
 async function supervisorTick(): Promise<SupervisorTick> {
   const recovered = await sweepJobs();
   const jobs = await listJobs();
   return {
     at: new Date().toISOString(),
     health: summarizeJobHealth(jobs),
+    actions: planJobActions(jobs),
     recovered,
   };
 }
@@ -148,6 +167,73 @@ function summarizeJobHealth(jobs: JobListItem[]): SupervisorHealthSummary {
   }
 
   return summary;
+}
+
+function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
+  const actions: SupervisorAction[] = [];
+  for (const job of jobs) {
+    if (job.status === "unreadable") {
+      actions.push({
+        jobKey: job.key,
+        kind: "inspect_unreadable",
+        severity: "critical",
+        reason: job.error ?? "job record is unreadable",
+        nextCommand: `codexctl job result ${job.key} --json`,
+      });
+      continue;
+    }
+
+    if (job.nextAction === "resolve_approval") {
+      actions.push({
+        jobKey: job.key,
+        kind: "resolve_approval",
+        severity: "attention",
+        reason: `${job.actionableApprovals} approval request(s) can be resolved`,
+        nextCommand: `codexctl approval list ${job.key} --json`,
+      });
+    }
+
+    if (job.nextAction === "wait_cancel") {
+      actions.push({
+        jobKey: job.key,
+        kind: "wait_cancel",
+        severity: "info",
+        reason: `turn interrupt is queued${job.cancelRequestedAt ? ` since ${job.cancelRequestedAt}` : ""}`,
+        nextCommand: `codexctl job summary ${job.key} --events 0 --json`,
+      });
+    }
+
+    if (job.nextAction === "inspect_error") {
+      actions.push({
+        jobKey: job.key,
+        kind: "inspect_error",
+        severity: "critical",
+        reason: job.error ?? "job failed",
+        nextCommand: `codexctl job summary ${job.key} --events 20 --json`,
+      });
+    }
+
+    if (job.status === "running" && job.workerHealth?.reason === "alive_stale") {
+      actions.push({
+        jobKey: job.key,
+        kind: "inspect_stale_worker",
+        severity: "attention",
+        reason: `worker heartbeat is stale${job.workerHealth.heartbeatAgeMs === null ? "" : ` by ${job.workerHealth.heartbeatAgeMs}ms`}`,
+        nextCommand: `codexctl job summary ${job.key} --events 20 --json`,
+      });
+    }
+
+    if (job.status === "running" && job.workerHealth && !job.workerHealth.alive) {
+      actions.push({
+        jobKey: job.key,
+        kind: "inspect_dead_worker",
+        severity: "critical",
+        reason: `worker is not alive (${job.workerHealth.reason})`,
+        nextCommand: `codexctl job summary ${job.key} --events 20 --json`,
+      });
+    }
+  }
+  return actions;
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

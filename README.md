@@ -21,6 +21,7 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl job sweep --json` reconciles all queued or running local jobs.
 - `codexctl approval list demo --json` lists pending approval requests.
 - `codexctl approval approve demo <approval-id> --json` resolves a pending approval.
+- `codexctl supervisor plan --json` returns recommended next actions without executing them.
 - `codexctl supervisor run --interval-ms 1000 --json` keeps sweeping queued or running jobs.
 - `codexctl job result demo --json` reads the persisted result.
 - `codexctl job events demo --json` streams the persisted event log.

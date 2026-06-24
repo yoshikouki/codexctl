@@ -46,6 +46,7 @@ codexctl approval show demo <approval-id> --json
 codexctl approval approve demo <approval-id> --json
 codexctl approval reject demo <approval-id> --json
 codexctl supervisor once --json
+codexctl supervisor plan --json
 codexctl supervisor run --interval-ms 1000 --json
 codexctl supervisor status --json
 codexctl supervisor events --json
@@ -84,7 +85,9 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 
 `job list` summarizes local job records as an agent overview: status, `nextAction`, worker health, pending/actionable approval counts, and cancel metadata. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
-`supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
+`supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command.
+
+`supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary and the same non-executing action plan so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 
 `job summary` returns a single post-run object for agent callers: current job state, prompt, `nextAction`, worker health, pending and actionable approvals, whether approvals can be resolved, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. `--events <n>` controls the compact event tail size and defaults to 10. Use `--events 0` to omit the event tail while keeping diagnostics.
 
