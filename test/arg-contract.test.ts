@@ -18,6 +18,7 @@ import {
   readNewEventLines,
   removeJob,
   pruneJobs,
+  reconcileJobs,
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
@@ -943,6 +944,95 @@ describe("job control files", () => {
     }
   });
 
+  test("reconcileJobs reports lifecycle decisions without applying in dry-run", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "queued-reconcile", repo: ".", prompt: "hello" });
+      await createJob({ key: "alive-reconcile", repo: ".", prompt: "hello" });
+      await createJob({ key: "dead-reconcile", repo: ".", prompt: "hello" });
+      await createJob({ key: "completed-reconcile", repo: ".", prompt: "hello" });
+      await mkdir(".codexctl/jobs/unreadable-reconcile", { recursive: true });
+      await Bun.write(".codexctl/jobs/unreadable-reconcile/job.json", "{not-json}\n");
+
+      const alive = await Bun.file(".codexctl/jobs/alive-reconcile/job.json").json();
+      alive.status = "running";
+      alive.workerPid = process.pid;
+      alive.workerHeartbeatAt = new Date().toISOString();
+      await Bun.write(".codexctl/jobs/alive-reconcile/job.json", JSON.stringify(alive));
+
+      const dead = await Bun.file(".codexctl/jobs/dead-reconcile/job.json").json();
+      dead.status = "running";
+      dead.workerPid = null;
+      dead.threadId = "thread-1";
+      dead.turnId = "turn-1";
+      await Bun.write(".codexctl/jobs/dead-reconcile/job.json", JSON.stringify(dead));
+
+      const completed = await Bun.file(".codexctl/jobs/completed-reconcile/job.json").json();
+      completed.status = "completed";
+      completed.completedAt = new Date().toISOString();
+      await Bun.write(".codexctl/jobs/completed-reconcile/job.json", JSON.stringify(completed));
+
+      const report = await reconcileJobs({ dryRun: true });
+      expect(report.dryRun).toBe(true);
+      expect(report.scanned).toBe(5);
+      expect(report.candidates).toBe(4);
+      expect(report.mutations).toBe(2);
+      expect(report.applied).toBe(0);
+      const byKey = new Map(report.items.map((item) => [item.key, item]));
+      expect(byKey.get("dead-reconcile")).toMatchObject({ decision: "fail_in_flight_dead_worker", mutates: true });
+      expect(byKey.get("alive-reconcile")).toMatchObject({ decision: "skip_worker_alive", mutates: false });
+      expect(byKey.get("unreadable-reconcile")).toMatchObject({ decision: "skip_unreadable", mutates: false });
+      expect(byKey.get("queued-reconcile")).toMatchObject({ decision: "restart_queued", mutates: true });
+      expect(report.items.find((item) => item.key === "queued-reconcile")?.result).toBeNull();
+      expect((await Bun.file(".codexctl/jobs/queued-reconcile/job.json").json()).status).toBe("queued");
+
+      const cli = await runCli(["job", "reconcile", "--dry-run", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).mutations).toBe(2);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job reconcile applies dead in-flight failure decisions", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "apply-reconcile", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/apply-reconcile/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const cli = await runCli(["job", "reconcile", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      const report = JSON.parse(cli.stdout);
+      expect(report.dryRun).toBe(false);
+      expect(report.mutations).toBe(1);
+      expect(report.applied).toBe(1);
+      expect(report.items[0]).toMatchObject({
+        key: "apply-reconcile",
+        decision: "fail_in_flight_dead_worker",
+        applied: true,
+        result: {
+          action: "failed",
+        },
+      });
+      expect((await Bun.file(jobPath).json()).status).toBe("failed");
+      expect(await Bun.file(".codexctl/jobs/apply-reconcile/events.jsonl").text()).toContain("recovery.failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("jobRecoveryStateId changes with worker identity", () => {
     const base = {
       jobIncarnation: "job-a",
@@ -1380,6 +1470,14 @@ describe("supervisor", () => {
       expect(state.tickCount).toBe(1);
       expect(state.lastTick?.recovered).toHaveLength(1);
       expect(state.lastTick?.recovered[0]?.job.key).toBe("supervisor-stale");
+      if (!state.lastTick?.reconciliation) throw new Error("expected reconciliation report");
+      expect(state.lastTick.reconciliation.scanned).toBe(1);
+      expect(state.lastTick.reconciliation.applied).toBe(1);
+      expect(state.lastTick.reconciliation.items[0]).toMatchObject({
+        key: "supervisor-stale",
+        decision: "fail_in_flight_dead_worker",
+        applied: true,
+      });
       expect(state.lastTick?.health.total).toBe(1);
       expect(state.lastTick?.health.failed).toBe(1);
       expect(state.lastTick?.health.inspectError).toBe(1);
@@ -1389,6 +1487,48 @@ describe("supervisor", () => {
       expect((await readSupervisorState()).tickCount).toBe(1);
       expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
       expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("readSupervisorState normalizes legacy ticks without reconciliation", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await mkdir(".codexctl/supervisor", { recursive: true });
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "stopped",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:01.000Z",
+        pid: null,
+        tickCount: 1,
+        lastTick: {
+          at: "2026-06-24T00:00:01.000Z",
+          health: {
+            total: 0,
+            unreadable: 0,
+            queued: 0,
+            running: 0,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+            staleWorkers: 0,
+            deadWorkers: 0,
+            pendingApprovals: 0,
+            actionableApprovals: 0,
+            waitingCancel: 0,
+            inspectError: 0,
+          },
+          actions: [],
+          recovered: [],
+        },
+      }));
+
+      const state = await readSupervisorState();
+      expect(state.lastTick?.reconciliation).toBeNull();
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

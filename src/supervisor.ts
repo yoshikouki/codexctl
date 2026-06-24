@@ -4,11 +4,12 @@ import { join } from "node:path";
 import {
   listJobs,
   jobRecoveryStateId,
+  reconcileJobs,
   readApprovals,
   readJobSummary,
   recoverJob,
-  sweepJobs,
   type ApprovalRecord,
+  type JobReconcileReport,
   type JobListItem,
   type JobRecoveryResult,
   type JobSummary,
@@ -26,6 +27,7 @@ export type SupervisorTick = {
   health: SupervisorHealthSummary;
   actions: SupervisorAction[];
   recovered: JobRecoveryResult[];
+  reconciliation: JobReconcileReport | null;
 };
 
 export type SupervisorActionHistory = {
@@ -220,7 +222,12 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
 }
 
 export async function readSupervisorState(): Promise<SupervisorState> {
-  return await Bun.file(join(supervisorDir(process.cwd()), "state.json")).json() as SupervisorState;
+  const state = await Bun.file(join(supervisorDir(process.cwd()), "state.json")).json() as SupervisorState;
+  const lastTick = state.lastTick;
+  if (lastTick !== null && typeof lastTick === "object" && !("reconciliation" in lastTick)) {
+    state.lastTick = Object.assign({}, lastTick, { reconciliation: null }) as SupervisorTick;
+  }
+  return state;
 }
 
 export async function readSupervisorEvents(): Promise<unknown[]> {
@@ -416,7 +423,8 @@ async function inspectActionPayload(action: SupervisorAction): Promise<Superviso
 }
 
 async function supervisorTick(previousTick: SupervisorTick | null): Promise<SupervisorTick> {
-  const recovered = await sweepJobs();
+  const reconciliation = await reconcileJobs();
+  const recovered = reconciliation.items.flatMap((item) => item.result ? [item.result] : []);
   const jobs = await listJobs();
   const at = new Date().toISOString();
   return {
@@ -424,6 +432,7 @@ async function supervisorTick(previousTick: SupervisorTick | null): Promise<Supe
     health: summarizeJobHealth(jobs),
     actions: annotatePolicyRecommendations(annotateActionPersistence(planJobActions(jobs), previousTick)),
     recovered,
+    reconciliation,
   };
 }
 

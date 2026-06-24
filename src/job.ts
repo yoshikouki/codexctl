@@ -101,6 +101,47 @@ export type JobRecoveryOptions = {
   expectedRecoveryStateId?: string | null;
 };
 
+export type JobReconcileOptions = {
+  dryRun?: boolean;
+};
+
+export type JobReconcileDecision =
+  | "restart_queued"
+  | "restart_before_thread"
+  | "fail_in_flight_dead_worker"
+  | "skip_worker_alive"
+  | "skip_terminal"
+  | "skip_unreadable";
+
+export type JobReconcileItem = {
+  key: string;
+  jobIncarnation: string | null;
+  status: JobStatus | "unreadable";
+  decision: JobReconcileDecision;
+  reason: string;
+  mutates: boolean;
+  applied: boolean;
+  recoveryStateId: string | null;
+  workerId: string | null;
+  workerGeneration: number | null;
+  workerPid: number | null;
+  workerHealth: WorkerHealth | null;
+  threadId: string | null;
+  turnId: string | null;
+  result: JobRecoveryResult | null;
+  error: string | null;
+};
+
+export type JobReconcileReport = {
+  at: string;
+  dryRun: boolean;
+  scanned: number;
+  candidates: number;
+  mutations: number;
+  applied: number;
+  items: JobReconcileItem[];
+};
+
 export type JobCancelResult = {
   action: "cancelled" | "interrupt_queued" | "already_requested" | "failed" | "none";
   reason: string;
@@ -329,13 +370,37 @@ export async function listJobs(): Promise<JobListItem[]> {
 }
 
 export async function sweepJobs(): Promise<JobRecoveryResult[]> {
+  const report = await reconcileJobs();
+  return report.items.flatMap((item) => item.result ? [item.result] : []);
+}
+
+export async function reconcileJobs(options: JobReconcileOptions = {}): Promise<JobReconcileReport> {
+  const dryRun = options.dryRun ?? false;
   const jobs = await listJobs();
-  const results: JobRecoveryResult[] = [];
+  const items: JobReconcileItem[] = [];
   for (const job of jobs) {
-    if (job.status !== "queued" && job.status !== "running") continue;
-    results.push(await recoverJob(job.key));
+    const item = classifyJobReconciliation(job);
+    if (!item) continue;
+    if (!dryRun && item.mutates) {
+      try {
+        item.result = await recoverJob(job.key, { expectedRecoveryStateId: item.recoveryStateId });
+        item.applied = true;
+      } catch (error) {
+        item.error = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    }
+    items.push(item);
   }
-  return results;
+  return {
+    at: new Date().toISOString(),
+    dryRun,
+    scanned: jobs.length,
+    candidates: items.length,
+    mutations: items.filter((item) => item.mutates).length,
+    applied: items.filter((item) => item.applied).length,
+    items,
+  };
 }
 
 export async function removeJob(key: string, options: JobRemoveOptions = {}): Promise<JobRemoveResult> {
@@ -1354,6 +1419,51 @@ function summarizeJob(job: JobRecord): JobListItem {
     actionableApprovals: actionableApprovals.length,
     cancelRequestedAt: job.cancelRequestedAt,
     error: job.error,
+  };
+}
+
+function classifyJobReconciliation(job: JobListItem): JobReconcileItem | null {
+  if (job.status === "unreadable") {
+    return reconcileItem(job, "skip_unreadable", job.error ?? "job record is unreadable", false);
+  }
+  if (isTerminalStatus(job.status)) {
+    return null;
+  }
+  if (job.status === "queued") {
+    return reconcileItem(job, "restart_queued", "queued job has no worker", true);
+  }
+  if (job.workerHealth?.alive) {
+    return reconcileItem(job, "skip_worker_alive", `worker ${job.workerPid} is alive`, false);
+  }
+  if (!job.threadId && !job.turnId) {
+    return reconcileItem(job, "restart_before_thread", "worker died before starting a thread", true);
+  }
+  return reconcileItem(job, "fail_in_flight_dead_worker", "in-flight app-server stdio session cannot be resumed", true);
+}
+
+function reconcileItem(
+  job: JobListItem,
+  decision: JobReconcileDecision,
+  reason: string,
+  mutates: boolean,
+): JobReconcileItem {
+  return {
+    key: job.key,
+    jobIncarnation: job.jobIncarnation,
+    status: job.status,
+    decision,
+    reason,
+    mutates,
+    applied: false,
+    recoveryStateId: job.status === "unreadable" ? null : jobRecoveryStateId(job),
+    workerId: job.workerId,
+    workerGeneration: job.workerGeneration,
+    workerPid: job.workerPid,
+    workerHealth: job.workerHealth,
+    threadId: job.threadId,
+    turnId: job.turnId,
+    result: null,
+    error: job.status === "unreadable" ? job.error : null,
   };
 }
 

@@ -14,6 +14,7 @@ import {
   readNewEventLines,
   removeJob,
   pruneJobs,
+  reconcileJobs,
   recoverJob,
   runJobWorker,
   startJob,
@@ -211,6 +212,13 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "sweep") {
     allowFlags(args, ["json"]);
     await printJson(await sweepJobs());
+    return;
+  }
+
+  if (resource === "job" && action === "reconcile") {
+    requirePositionalCount(args, 2);
+    allowFlags(args, ["json", "dry-run"]);
+    await printJson(await reconcileJobs({ dryRun: booleanFlag(args, "dry-run") }));
     return;
   }
 
@@ -483,6 +491,7 @@ function usageText(): string {
   codexctl job prune [--keep <n>] [--status completed|failed|cancelled|terminal] [--dry-run] --json
   codexctl job recover <key> --json
   codexctl job sweep --json
+  codexctl job reconcile [--dry-run] --json
   codexctl approval list <job-key> [--all] --json
   codexctl approval show <job-key> <approval-id> --json
   codexctl approval approve <job-key> <approval-id> [--for-session] --json
