@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
+import { parseArgs } from "../src/cli.ts";
 import {
   approvalResponseFor,
   createJob,
@@ -15,6 +16,90 @@ import {
   sweepJobs,
 } from "../src/job.ts";
 import { readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
+
+const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
+
+async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn([process.execPath, cliPath, ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
+describe("cli output contract", () => {
+  test("inline flags preserve equals in values", () => {
+    const args = parseArgs(["job", "start", "--key=inline-equals", "--prompt=a=b"]);
+    expect(args.flags.get("key")).toBe("inline-equals");
+    expect(args.flags.get("prompt")).toBe("a=b");
+  });
+
+  test("public commands require --json", async () => {
+    const result = await runCli(["job", "list"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Public commands require --json");
+  });
+
+  test("--json errors are structured for machine callers", async () => {
+    const result = await runCli(["job", "start", "--key=missing-prompt", "--json"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "usage_error",
+        message: "Missing required --prompt",
+      },
+    });
+  });
+
+  test("--json parse errors stay structured", async () => {
+    const result = await runCli(["--=x", "--json"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "invalid_flag",
+        message: "Flag name cannot be empty",
+      },
+    });
+  });
+
+  test("unknown flags are rejected", async () => {
+    const result = await runCli(["job", "list", "--json", "--unknown-flag"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "invalid_flag",
+        message: "Unknown flag --unknown-flag",
+      },
+    });
+  });
+
+  test("help is human-readable without --json", async () => {
+    const result = await runCli(["--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("codexctl job start");
+  });
+
+  test("help supports --json", async () => {
+    const result = await runCli(["--help", "--json"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout).usage).toContain("codexctl job start");
+  });
+});
 
 describe("approval protocol", () => {
   test("maps permissions approval to a scoped permission grant", () => {

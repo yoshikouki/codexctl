@@ -23,7 +23,7 @@ The public model is `Job`, not app-server `Thread`.
 
 ## Commands
 
-All commands support `--json`. Machine callers should use it.
+Non-help public commands require `--json`. Machine callers can depend on JSON for success responses, JSON Lines for streaming event commands, and structured JSON errors on stderr.
 
 ```sh
 codexctl doctor --json
@@ -51,6 +51,20 @@ codexctl job result demo --json
 ## Current PoC Semantics
 
 `job start` launches `codex app-server --stdio`, sends newline-delimited JSON-RPC, starts a thread, starts a turn, records server notifications, and exits when `turn/completed` arrives for that turn.
+
+If a `--json` command fails, stderr contains:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "usage_error",
+    "message": "Missing required --prompt"
+  }
+}
+```
+
+Known error codes are `usage_error`, `invalid_flag`, `missing_json_flag`, and `internal_error`.
 
 `job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
 

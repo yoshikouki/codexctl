@@ -21,11 +21,52 @@ type Args = {
   flags: Map<string, string | boolean>;
 };
 
-async function main(argv: string[]): Promise<void> {
+class CliError extends Error {
+  constructor(
+    readonly code: "usage_error" | "invalid_flag" | "missing_json_flag",
+    message: string,
+    readonly exitCode = 2,
+  ) {
+    super(message);
+  }
+}
+
+const knownPublicFlags = [
+  "all",
+  "approval-policy",
+  "cancel",
+  "detach",
+  "for-session",
+  "force",
+  "help",
+  "interval-ms",
+  "json",
+  "key",
+  "max-ticks",
+  "model",
+  "prompt",
+  "repo",
+  "sandbox",
+];
+
+export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const [resource, action, key, extra] = args.positionals;
 
+  if (booleanFlag(args, "help") || resource === "help") {
+    if (jsonFlag(args)) {
+      await printJson({ usage: usageText() });
+    } else {
+      await printText(usageText());
+    }
+    return;
+  }
+
+  allowFlags(args, knownPublicFlags);
+  requireJsonForPublicCommand(args);
+
   if (resource === "doctor") {
+    allowFlags(args, ["json"]);
     await printJson({
       ok: true,
       daemon: await readDaemonVersion(),
@@ -35,6 +76,7 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "start") {
+    allowFlags(args, ["json", "key", "repo", "prompt", "model", "approval-policy", "sandbox", "force", "detach"]);
     const jobKey = requiredString(args, "key");
     const repo = stringFlag(args, "repo") ?? ".";
     const prompt = requiredString(args, "prompt");
@@ -48,11 +90,13 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "list") {
+    allowFlags(args, ["json"]);
     await printJson(await listJobs());
     return;
   }
 
   if (resource === "job" && action === "status" && key) {
+    allowFlags(args, ["json"]);
     const job = await readJob(key);
     await printJson({
       key: job.key,
@@ -66,11 +110,13 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "result" && key) {
+    allowFlags(args, ["json"]);
     await printJson(await readJob(key));
     return;
   }
 
   if (resource === "job" && action === "events" && key) {
+    allowFlags(args, ["json"]);
     for (const event of await readJobEvents(key)) {
       console.log(JSON.stringify(event));
     }
@@ -78,61 +124,73 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "watch" && key) {
+    allowFlags(args, ["json"]);
     await watchJob(key);
     return;
   }
 
   if (resource === "job" && action === "steer" && key) {
+    allowFlags(args, ["json", "prompt"]);
     await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
     return;
   }
 
   if (resource === "job" && action === "recover" && key) {
+    allowFlags(args, ["json"]);
     await printJson(await recoverJob(key));
     return;
   }
 
   if (resource === "job" && action === "sweep") {
+    allowFlags(args, ["json"]);
     await printJson(await sweepJobs());
     return;
   }
 
   if (resource === "approval" && action === "list" && key) {
+    allowFlags(args, ["json", "all"]);
     await printJson(await readApprovals(key, booleanFlag(args, "all")));
     return;
   }
 
   if (resource === "approval" && action === "show" && key && extra) {
+    allowFlags(args, ["json"]);
     await printJson(await readApproval(key, extra));
     return;
   }
 
   if (resource === "approval" && action === "approve" && key && extra) {
+    allowFlags(args, ["json", "for-session"]);
     await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "for-session") ? "approveForSession" : "approve"));
     return;
   }
 
   if (resource === "approval" && action === "reject" && key && extra) {
+    allowFlags(args, ["json", "cancel"]);
     await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "cancel") ? "cancel" : "reject"));
     return;
   }
 
   if (resource === "supervisor" && action === "once") {
+    allowFlags(args, ["json", "interval-ms"]);
     await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), once: true }));
     return;
   }
 
   if (resource === "supervisor" && action === "run") {
+    allowFlags(args, ["json", "interval-ms", "max-ticks"]);
     await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
     return;
   }
 
   if (resource === "supervisor" && action === "status") {
+    allowFlags(args, ["json"]);
     await printJson(await readSupervisorState());
     return;
   }
 
   if (resource === "supervisor" && action === "events") {
+    allowFlags(args, ["json"]);
     for (const event of await readSupervisorEvents()) {
       console.log(JSON.stringify(event));
     }
@@ -140,15 +198,15 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "internal" && action === "worker" && key) {
+    allowFlags(args, []);
     await runJobWorker(key);
     return;
   }
 
-  usage();
-  process.exit(2);
+  throw new CliError("usage_error", usageText());
 }
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   const positionals: string[] = [];
   const flags = new Map<string, string | boolean>();
   for (let index = 0; index < argv.length; index++) {
@@ -158,7 +216,14 @@ function parseArgs(argv: string[]): Args {
       positionals.push(arg);
       continue;
     }
-    const name = arg.slice(2);
+    const flag = arg.slice(2);
+    const equalsIndex = flag.indexOf("=");
+    const name = equalsIndex >= 0 ? flag.slice(0, equalsIndex) : flag;
+    if (!name) throw new CliError("invalid_flag", "Flag name cannot be empty");
+    if (equalsIndex >= 0) {
+      flags.set(name, flag.slice(equalsIndex + 1));
+      continue;
+    }
     const next = argv[index + 1];
     if (!next || next.startsWith("--")) {
       flags.set(name, true);
@@ -179,10 +244,24 @@ function booleanFlag(args: Args, name: string): boolean {
   return args.flags.get(name) === true;
 }
 
+function jsonFlag(args: Args): boolean {
+  const value = args.flags.get("json");
+  return value === true || value === "true";
+}
+
+function allowFlags(args: Args, allowed: string[]): void {
+  const allowedSet = new Set(allowed);
+  for (const name of args.flags.keys()) {
+    if (!allowedSet.has(name)) {
+      throw new CliError("invalid_flag", `Unknown flag --${name}`);
+    }
+  }
+}
+
 function requiredString(args: Args, name: string): string {
   const value = stringFlag(args, name);
   if (!value) {
-    throw new Error(`Missing required --${name}`);
+    throw new CliError("usage_error", `Missing required --${name}`);
   }
   return value;
 }
@@ -191,14 +270,14 @@ function approvalPolicyFlag(args: Args): "untrusted" | "on-failure" | "on-reques
   const value = stringFlag(args, "approval-policy");
   if (value === null) return undefined;
   if (value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never") return value;
-  throw new Error("--approval-policy must be one of: untrusted, on-failure, on-request, never");
+  throw new CliError("invalid_flag", "--approval-policy must be one of: untrusted, on-failure, on-request, never");
 }
 
 function sandboxFlag(args: Args): "read-only" | "workspace-write" | "danger-full-access" | undefined {
   const value = stringFlag(args, "sandbox");
   if (value === null) return undefined;
   if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") return value;
-  throw new Error("--sandbox must be one of: read-only, workspace-write, danger-full-access");
+  throw new CliError("invalid_flag", "--sandbox must be one of: read-only, workspace-write, danger-full-access");
 }
 
 function intervalMsFlag(args: Args): number {
@@ -210,7 +289,7 @@ function numberFlag(args: Args, name: string): number | null {
   if (value === null) return null;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`--${name} must be a positive integer`);
+    throw new CliError("invalid_flag", `--${name} must be a positive integer`);
   }
   return parsed;
 }
@@ -219,8 +298,18 @@ async function printJson(value: unknown): Promise<void> {
   await Bun.write(Bun.stdout, JSON.stringify(value, null, 2) + "\n");
 }
 
-function usage(): void {
-  console.error(`Usage:
+async function printText(value: string): Promise<void> {
+  await Bun.write(Bun.stdout, value.endsWith("\n") ? value : value + "\n");
+}
+
+function requireJsonForPublicCommand(args: Args): void {
+  if (jsonFlag(args)) return;
+  if (args.positionals[0] === "internal") return;
+  throw new CliError("missing_json_flag", "Public commands require --json for machine-readable output");
+}
+
+function usageText(): string {
+  return `Usage:
   codexctl doctor --json
   codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
   codexctl job list --json
@@ -238,7 +327,7 @@ function usage(): void {
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json
-  codexctl job result <key> --json`);
+  codexctl job result <key> --json`;
 }
 
 async function watchJob(key: string): Promise<void> {
@@ -257,7 +346,25 @@ async function watchJob(key: string): Promise<void> {
   }
 }
 
-main(Bun.argv.slice(2)).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (import.meta.main) {
+  main(Bun.argv.slice(2)).catch(async (error) => {
+    const exitCode = error instanceof CliError ? error.exitCode : 1;
+    const message = error instanceof Error ? error.message : String(error);
+    if (argvWantsJson(Bun.argv.slice(2))) {
+      await Bun.write(Bun.stderr, JSON.stringify({
+        ok: false,
+        error: {
+          code: error instanceof CliError ? error.code : "internal_error",
+          message,
+        },
+      }, null, 2) + "\n");
+    } else {
+      await Bun.write(Bun.stderr, message.endsWith("\n") ? message : message + "\n");
+    }
+    process.exit(exitCode);
+  });
+}
+
+function argvWantsJson(argv: string[]): boolean {
+  return argv.some((arg) => arg === "--json" || arg === "--json=true");
+}

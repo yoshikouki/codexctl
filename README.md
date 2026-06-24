@@ -2,7 +2,7 @@
 
 Agent-oriented CLI for controlling Codex app-server jobs.
 
-This repository starts with a small Bun-based proof of concept:
+This repository starts with a small Bun-based proof of concept. Non-help public commands require `--json` so agent callers can depend on a stable output mode:
 
 - `codexctl doctor --json` checks the local Codex app-server daemon.
 - `codexctl job start --repo . --key demo --prompt "..." --json` runs a Codex turn through `codex app-server --stdio`.
@@ -21,3 +21,15 @@ This repository starts with a small Bun-based proof of concept:
 - `codexctl job events demo --json` streams the persisted event log.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
+
+When a `--json` command fails, `codexctl` writes a structured error to stderr:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "usage_error",
+    "message": "Missing required --prompt"
+  }
+}
+```
