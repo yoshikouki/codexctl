@@ -20,7 +20,7 @@ import {
   sweepJobs,
   workerHealth,
 } from "./job.ts";
-import { planSupervisorActions, readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
+import { planSupervisorActions, readSupervisorActionHistory, readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
 
 type Args = {
   positionals: string[];
@@ -58,6 +58,7 @@ const knownPublicFlags = [
   "repo",
   "sandbox",
   "status",
+  "ticks",
 ];
 
 export async function main(argv: string[]): Promise<void> {
@@ -234,6 +235,12 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "actions") {
+    allowFlags(args, ["json", "ticks"]);
+    await printJson(await readSupervisorActionHistory(nonNegativeIntegerFlag(args, "ticks", 10)));
+    return;
+  }
+
   if (resource === "supervisor" && action === "run") {
     allowFlags(args, ["json", "interval-ms", "max-ticks"]);
     await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
@@ -366,8 +373,14 @@ function eventLimitFlag(args: Args): number {
 }
 
 function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): number {
-  const value = stringFlag(args, name);
-  if (value === null) return fallback;
+  const value = args.flags.get(name);
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") {
+    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
+  }
+  if (value.trim().length === 0) {
+    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
@@ -376,8 +389,14 @@ function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): num
 }
 
 function numberFlag(args: Args, name: string): number | null {
-  const value = stringFlag(args, name);
-  if (value === null) return null;
+  const value = args.flags.get(name);
+  if (value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new CliError("invalid_flag", `--${name} must be a positive integer`);
+  }
+  if (value.trim().length === 0) {
+    throw new CliError("invalid_flag", `--${name} must be a positive integer`);
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new CliError("invalid_flag", `--${name} must be a positive integer`);
@@ -420,6 +439,7 @@ function usageText(): string {
   codexctl approval reject <job-key> <approval-id> [--cancel] --json
   codexctl supervisor once [--interval-ms <ms>] --json
   codexctl supervisor plan --json
+  codexctl supervisor actions [--ticks <n>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json

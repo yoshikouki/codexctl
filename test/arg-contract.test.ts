@@ -20,7 +20,7 @@ import {
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
-import { planSupervisorActions, readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
+import { planSupervisorActions, readSupervisorActionHistory, readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -1133,6 +1133,57 @@ describe("supervisor", () => {
       expect(tickEvents[0]?.tick.actions[0]?.firstSeenAt).toBeUndefined();
       expect(tickEvents[1]?.tick.actions[0]?.seenTicks).toBe(2);
       expect(tickEvents[1]?.tick.actions[0]?.firstSeenAt).toBe(tickEvents[0]?.tick.at);
+
+      const history = await readSupervisorActionHistory(1);
+      expect(history.tickLimit).toBe(1);
+      expect(history.eventsScanned).toBe(2);
+      expect(history.tickCount).toBe(1);
+      expect(history.latestTickAt).toBe(tickEvents[1]?.tick.at ?? null);
+      expect(history.latestActions[0]?.seenTicks).toBe(2);
+      expect(history.ticks[0]?.actions[0]?.seenTicks).toBe(2);
+
+      const cli = await runCli(["supervisor", "actions", "--ticks", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(cli.stderr).toBe("");
+      const body = JSON.parse(cli.stdout);
+      expect(body.tickCount).toBe(1);
+      expect(body.latestActions[0]?.seenTicks).toBe(2);
+
+      const emptyCli = await runCli(["supervisor", "actions", "--ticks", "0", "--json"], tmp);
+      expect(emptyCli.exitCode).toBe(0);
+      const emptyBody = JSON.parse(emptyCli.stdout);
+      expect(emptyBody.tickCount).toBe(0);
+      expect(emptyBody.eventsScanned).toBe(0);
+      expect(emptyBody.latestActions).toEqual([]);
+      expect(emptyBody.ticks).toEqual([]);
+
+      const missingTicks = await runCli(["supervisor", "actions", "--ticks", "--json"], tmp);
+      expect(missingTicks.exitCode).toBe(2);
+      expect(JSON.parse(missingTicks.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "invalid_flag",
+          message: "--ticks must be a non-negative integer",
+        },
+      });
+
+      const emptyTicks = await runCli(["supervisor", "actions", "--ticks=", "--json"], tmp);
+      expect(emptyTicks.exitCode).toBe(2);
+      expect(JSON.parse(emptyTicks.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "invalid_flag",
+          message: "--ticks must be a non-negative integer",
+        },
+      });
+
+      await Bun.write(
+        ".codexctl/supervisor/events.jsonl",
+        await Bun.file(".codexctl/supervisor/events.jsonl").text() + "{not-json}\n",
+      );
+      const corruptTailHistory = await readSupervisorActionHistory(1);
+      expect(corruptTailHistory.tickCount).toBe(1);
+      expect(corruptTailHistory.latestActions[0]?.seenTicks).toBe(2);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

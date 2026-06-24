@@ -1,7 +1,9 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { appendFile, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from "./job.ts";
 
+const HISTORY_READ_CHUNK_BYTES = 64 * 1024;
 const WAIT_CANCEL_ATTENTION_MS = 60_000;
 const WAIT_CANCEL_CRITICAL_MS = 5 * 60_000;
 const STALE_WORKER_CRITICAL_MS = 5 * 60_000;
@@ -12,6 +14,23 @@ export type SupervisorTick = {
   health: SupervisorHealthSummary;
   actions: SupervisorAction[];
   recovered: JobRecoveryResult[];
+};
+
+export type SupervisorActionHistory = {
+  at: string;
+  tickLimit: number;
+  eventsScanned: number;
+  tickCount: number;
+  latestTickAt: string | null;
+  latestActions: SupervisorAction[];
+  ticks: SupervisorActionHistoryTick[];
+};
+
+export type SupervisorActionHistoryTick = {
+  eventAt: string | null;
+  tickAt: string;
+  health: SupervisorHealthSummary;
+  actions: SupervisorAction[];
 };
 
 export type SupervisorHealthSummary = {
@@ -133,6 +152,84 @@ export async function readSupervisorEvents(): Promise<unknown[]> {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as unknown);
+}
+
+export async function readSupervisorActionHistory(tickLimit = 10): Promise<SupervisorActionHistory> {
+  const { eventsScanned, ticks } = await readRecentSupervisorActionTicks(supervisorDir(process.cwd()), tickLimit);
+  const latest = ticks.at(-1) ?? null;
+  return {
+    at: new Date().toISOString(),
+    tickLimit,
+    eventsScanned,
+    tickCount: ticks.length,
+    latestTickAt: latest?.tickAt ?? null,
+    latestActions: latest?.actions ?? [],
+    ticks,
+  };
+}
+
+async function readRecentSupervisorActionTicks(
+  dir: string,
+  tickLimit: number,
+): Promise<{ eventsScanned: number; ticks: SupervisorActionHistoryTick[] }> {
+  if (tickLimit <= 0) return { eventsScanned: 0, ticks: [] };
+  const path = join(dir, "events.jsonl");
+  if (!(await Bun.file(path).exists())) return { eventsScanned: 0, ticks: [] };
+
+  const file = await open(path, "r");
+  const ticks: SupervisorActionHistoryTick[] = [];
+  let eventsScanned = 0;
+  let remainder = Buffer.alloc(0);
+  try {
+    const stat = await file.stat();
+    let position = stat.size;
+    while (position > 0 && ticks.length < tickLimit) {
+      const readSize = Math.min(HISTORY_READ_CHUNK_BYTES, position);
+      position -= readSize;
+      const chunk = Buffer.alloc(readSize);
+      const { bytesRead } = await file.read(chunk, 0, readSize, position);
+      const combined = Buffer.concat([chunk.subarray(0, bytesRead), remainder]);
+      let end = combined.length;
+      for (let index = combined.length - 1; index >= 0; index--) {
+        if (combined[index] !== 0x0a) continue;
+        const line = combined.subarray(index + 1, end).toString("utf8");
+        const tick = parseSupervisorActionTickLine(line);
+        if (line.trim().length > 0) eventsScanned++;
+        if (tick) ticks.unshift(tick);
+        end = index;
+        if (ticks.length >= tickLimit) break;
+      }
+      remainder = combined.subarray(0, end);
+    }
+
+    if (position === 0 && ticks.length < tickLimit && remainder.length > 0) {
+      const line = remainder.toString("utf8");
+      const tick = parseSupervisorActionTickLine(line);
+      if (line.trim().length > 0) eventsScanned++;
+      if (tick) ticks.unshift(tick);
+    }
+  } finally {
+    await file.close();
+  }
+
+  return { eventsScanned, ticks };
+}
+
+function parseSupervisorActionTickLine(line: string): SupervisorActionHistoryTick | null {
+  if (line.trim().length === 0) return null;
+  let event: unknown;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isSupervisorTickEvent(event)) return null;
+  return {
+    eventAt: typeof event.at === "string" ? event.at : null,
+    tickAt: event.tick.at,
+    health: event.tick.health,
+    actions: event.tick.actions,
+  };
 }
 
 export async function planSupervisorActions(): Promise<{ at: string; health: SupervisorHealthSummary; actions: SupervisorAction[] }> {
@@ -365,6 +462,18 @@ function criticalPersistence(
   if (action.severity !== "critical") return {};
   if (previous.severity !== "critical") return { criticalSeenTicks: 1 };
   return { criticalSeenTicks: (previous.criticalSeenTicks ?? 1) + 1 };
+}
+
+function isSupervisorTickEvent(event: unknown): event is { type: "supervisor.tick"; at?: unknown; tick: SupervisorTick } {
+  if (typeof event !== "object" || event === null) return false;
+  const candidate = event as { type?: unknown; tick?: unknown };
+  if (candidate.type !== "supervisor.tick") return false;
+  if (typeof candidate.tick !== "object" || candidate.tick === null) return false;
+  const tick = candidate.tick as Partial<SupervisorTick>;
+  return typeof tick.at === "string"
+    && Array.isArray(tick.actions)
+    && typeof tick.health === "object"
+    && tick.health !== null;
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

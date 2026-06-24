@@ -47,6 +47,7 @@ codexctl approval approve demo <approval-id> --json
 codexctl approval reject demo <approval-id> --json
 codexctl supervisor once --json
 codexctl supervisor plan --json
+codexctl supervisor actions --ticks 10 --json
 codexctl supervisor run --interval-ms 1000 --json
 codexctl supervisor status --json
 codexctl supervisor events --json
@@ -86,6 +87,8 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 `job list` summarizes local job records as an agent overview: status, `nextAction`, worker health, pending/actionable approval counts, and cancel metadata. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
 `supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command. Time-sensitive actions may include `ageMs` and `thresholdMs`: pending cancellation is `info` below 60 seconds, `attention` from 60 seconds, and `critical` from 5 minutes; stale worker heartbeat inspection becomes `critical` from 5 minutes. During `supervisor run`, actions may also include `firstSeenAt`, `seenTicks`, and `criticalSeenTicks`, derived by matching the current recommendation against the previous tick in the same run. Critical actions may include `policy`, a non-mutating controller hint with `recommendation: "inspect"` or `recommendation: "escalate"`, `reason`, `basedOn`, and optionally `thresholdTicks`. These fields are observational; they do not trigger automatic execution.
+
+`supervisor actions` scans `.codexctl/supervisor/events.jsonl` from the tail and returns bounded recent `supervisor.tick` action history. It includes `tickLimit`, `eventsScanned` for the tail lines inspected, `tickCount`, `latestTickAt`, `latestActions`, and `ticks[]` with each tick's action list and health summary. It is read-only: it does not sweep jobs, execute `nextCommand`, or apply policy recommendations.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary and the same non-executing action plan so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 
