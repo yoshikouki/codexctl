@@ -355,6 +355,9 @@ export async function enqueueApprovalDecision(
   if (approval.status !== "pending") {
     throw new Error(`Approval '${approvalId}' is already ${approval.status}`);
   }
+  if (approval.method === "item/permissions/requestApproval" && (decision === "reject" || decision === "cancel")) {
+    throw new Error("Permission approval requests do not support reject/cancel responses in the current app-server schema");
+  }
   const command: ApprovalResolveCommand = {
     id: crypto.randomUUID(),
     type: "approval.resolve",
@@ -537,7 +540,7 @@ async function resolveApprovalCommand(
   });
 }
 
-function approvalResponseFor(
+export function approvalResponseFor(
   approval: ApprovalRecord,
   decision: ApprovalResolveCommand["decision"],
 ): { supported: true; response: unknown } | { supported: false; error: string } {
@@ -550,7 +553,29 @@ function approvalResponseFor(
   if (approval.method === "execCommandApproval" || approval.method === "applyPatchApproval") {
     return { supported: true, response: { decision: legacyApprovalDecision(decision) } };
   }
+  if (approval.method === "item/permissions/requestApproval") {
+    return permissionsApprovalResponseFor(approval, decision);
+  }
   return { supported: false, error: `Approval method '${approval.method}' is not supported yet` };
+}
+
+function permissionsApprovalResponseFor(
+  approval: ApprovalRecord,
+  decision: ApprovalResolveCommand["decision"],
+): { supported: true; response: unknown } | { supported: false; error: string } {
+  if (decision === "reject" || decision === "cancel") {
+    return { supported: false, error: "Permission approval requests only support approve or approveForSession responses" };
+  }
+  if (!isObject(approval.params) || !isObject(approval.params.permissions)) {
+    return { supported: false, error: "Permission approval request params did not include a permissions object" };
+  }
+  return {
+    supported: true,
+    response: {
+      permissions: approval.params.permissions,
+      scope: decision === "approveForSession" ? "session" : "turn",
+    },
+  };
 }
 
 function modernApprovalDecision(approval: ApprovalRecord, decision: ApprovalResolveCommand["decision"]): unknown {

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import {
+  approvalResponseFor,
   createJob,
   enqueueApprovalDecision,
   enqueueSteer,
@@ -13,6 +14,49 @@ import {
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
+
+describe("approval protocol", () => {
+  test("maps permissions approval to a scoped permission grant", () => {
+    const approval = {
+      id: "1",
+      serverRequestId: 1,
+      method: "item/permissions/requestApproval",
+      params: {
+        permissions: {
+          network: { enabled: true },
+          fileSystem: null,
+        },
+      },
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+      decision: null,
+      error: null,
+    };
+
+    expect(approvalResponseFor(approval, "approve")).toEqual({
+      supported: true,
+      response: {
+        permissions: {
+          network: { enabled: true },
+          fileSystem: null,
+        },
+        scope: "turn",
+      },
+    });
+    expect(approvalResponseFor(approval, "approveForSession")).toEqual({
+      supported: true,
+      response: {
+        permissions: {
+          network: { enabled: true },
+          fileSystem: null,
+        },
+        scope: "session",
+      },
+    });
+    expect(approvalResponseFor(approval, "reject")).toMatchObject({ supported: false });
+  });
+});
 
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
@@ -44,6 +88,36 @@ describe("event store", () => {
       expect(command.type).toBe("approval.resolve");
       expect(await readApprovals("approval-test")).toHaveLength(1);
       expect(await Bun.file(".codexctl/jobs/approval-test/control.jsonl").text()).toContain("approval.resolve");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("enqueueApprovalDecision rejects unsupported permission denials", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "permission-approval-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/permission-approval-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.approvals.push({
+        id: "1",
+        serverRequestId: 1,
+        method: "item/permissions/requestApproval",
+        params: { permissions: { network: { enabled: true }, fileSystem: null } },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+      await expect(enqueueApprovalDecision("permission-approval-test", "1", "reject")).rejects.toThrow("do not support reject/cancel");
+      const command = await enqueueApprovalDecision("permission-approval-test", "1", "approveForSession");
+      expect(command.decision).toBe("approveForSession");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

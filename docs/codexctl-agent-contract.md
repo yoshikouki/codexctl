@@ -66,6 +66,8 @@ The persisted files live in `.codexctl/jobs/<job-key>/`:
 
 Approval server requests are copied into `job.json.approvals`. Approval decisions are appended to `control.jsonl`; the worker translates them into the correct JSON-RPC response for supported app-server methods.
 
+`item/permissions/requestApproval` uses a different response shape from command and file approvals. `approval approve` grants the requested permissions for the current turn, and `approval approve --for-session` grants them for the session. The current app-server schema does not define a reject/cancel response for permissions approvals, so `codexctl` rejects those decisions before appending a control command.
+
 ## Future Async Semantics
 
 A later supervisor can replace the one-worker-per-job model. The command contract should remain job-key based:
@@ -76,6 +78,6 @@ A later supervisor can replace the one-worker-per-job model. The command contrac
 
 ## Known Gaps
 
-- `item/permissions/requestApproval` is listed but not yet safely resolvable because its response schema is not a simple accept/decline decision.
+- `item/permissions/requestApproval` denial is not mapped because the current app-server schema exposes only a permission grant response.
 - In-flight app-server stdio sessions cannot yet be resumed after worker loss; `job recover` marks them failed rather than replaying the prompt.
 - The app-server process is still one worker-owned stdio process per active job; long-running jobs need a supervisor.
