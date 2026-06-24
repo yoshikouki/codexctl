@@ -278,6 +278,8 @@ describe("compact job events", () => {
       const jobPath = ".codexctl/jobs/summary-test/job.json";
       const job = await Bun.file(jobPath).json();
       job.status = "completed";
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = "2026-06-24T00:00:00.000Z";
       job.threadId = "thread-1";
       job.turnId = "turn-1";
       job.finalResponse = "done";
@@ -347,6 +349,9 @@ describe("compact job events", () => {
       const summary = await readJobSummary("summary-test", 1);
       expect(summary.status).toBe("completed");
       expect(summary.nextAction).toBe("read_result");
+      expect(summary.workerHealth.reason).toBe("terminal");
+      expect(summary.workerHealth.pid).toBe(process.pid);
+      expect(summary.workerHealth.stale).toBe(false);
       expect(summary.finalResponse).toBe("done");
       expect(summary.pendingApprovals).toHaveLength(1);
       expect(summary.actionableApprovals).toHaveLength(0);
@@ -372,6 +377,10 @@ describe("compact job events", () => {
       expect(cli.exitCode).toBe(0);
       expect(cli.stderr).toBe("");
       expect(JSON.parse(cli.stdout).finalResponse).toBe("done");
+
+      const status = await runCli(["job", "status", "summary-test", "--json"], tmp);
+      expect(status.exitCode).toBe(0);
+      expect(JSON.parse(status.stdout).workerHealth.reason).toBe("terminal");
 
       const noEvents = await runCli(["job", "summary", "summary-test", "--events", "0", "--json"], tmp);
       expect(noEvents.exitCode).toBe(0);
@@ -429,6 +438,38 @@ describe("approval protocol", () => {
 describe("event store", () => {
   test("missing job events read as an empty list", async () => {
     expect(await readJobEvents("missing-test-job")).toEqual([]);
+  });
+
+  test("job status reports worker health without parsing event logs", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "status-health-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/status-health-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
+      await Bun.write(jobPath, JSON.stringify(job));
+      const freshHeartbeat = new Date().toISOString();
+      await Bun.write(".codexctl/jobs/status-health-test/worker-heartbeat.json", JSON.stringify({
+        workerPid: process.pid,
+        workerHeartbeatAt: freshHeartbeat,
+      }));
+      await Bun.write(".codexctl/jobs/status-health-test/events.jsonl", "{not-json}\n");
+
+      const status = await runCli(["job", "status", "status-health-test", "--json"], tmp);
+      expect(status.exitCode).toBe(0);
+      const body = JSON.parse(status.stdout);
+      expect(body.workerHeartbeatAt).toBe(freshHeartbeat);
+      expect(body.workerHealth.heartbeatAt).toBe(freshHeartbeat);
+      expect(body.workerHealth.alive).toBe(true);
+      expect(body.workerHealth.reason).toBe("alive_recent");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 
   test("enqueueApprovalDecision appends an approval resolve command", async () => {
@@ -533,11 +574,21 @@ describe("event store", () => {
       const result = await cancelJob("cancel-running-test");
       expect(result.action).toBe("interrupt_queued");
       expect(result.command?.type).toBe("turn.interrupt");
+      if (!result.command) throw new Error("expected cancel command");
       expect(typeof result.job.cancelRequestedAt).toBe("string");
       const summary = await readJobSummary("cancel-running-test", 0);
       expect(summary.nextAction).toBe("wait_cancel");
       expect(summary.canResolveApprovals).toBe(false);
       expect(await Bun.file(".codexctl/jobs/cancel-running-test/control.jsonl").text()).toContain("turn.interrupt");
+
+      const staleWorkerRecord = await Bun.file(jobPath).json();
+      staleWorkerRecord.cancelRequestedAt = null;
+      staleWorkerRecord.cancelCommandId = null;
+      await Bun.write(jobPath, JSON.stringify(staleWorkerRecord));
+      const recoveredSummary = await readJobSummary("cancel-running-test", 0);
+      expect(recoveredSummary.nextAction).toBe("wait_cancel");
+      expect(recoveredSummary.cancelRequestedAt).toBe(result.command?.at);
+      expect(recoveredSummary.cancelCommandId).toBe(result.command?.id);
 
       const cli = await runCli(["job", "cancel", "cancel-running-test", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
@@ -793,6 +844,7 @@ describe("job control files", () => {
       const stale = await Bun.file(stalePath).json();
       stale.status = "running";
       stale.workerPid = null;
+      stale.workerHeartbeatAt = "2026-06-24T00:00:00.000Z";
       stale.threadId = "thread-1";
       stale.turnId = "turn-1";
       await Bun.write(stalePath, JSON.stringify(stale));
@@ -801,11 +853,37 @@ describe("job control files", () => {
       expect(jobs.map((job) => job.key).sort()).toEqual(["completed-job", "legacy-job", "stale-job"]);
       expect(jobs.find((job) => job.key === "completed-job")?.pendingApprovals).toBe(1);
       expect(jobs.find((job) => job.key === "legacy-job")?.pendingApprovals).toBe(0);
+      expect(jobs.find((job) => job.key === "legacy-job")?.workerHeartbeatAt).toBe(null);
+      expect(jobs.find((job) => job.key === "stale-job")?.workerAlive).toBe(false);
 
       const sweep = await sweepJobs();
       expect(sweep).toHaveLength(1);
       expect(sweep[0]?.job.key).toBe("stale-job");
       expect(sweep[0]?.action).toBe("failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job summary reports stale live worker heartbeat", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "heartbeat-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/heartbeat-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const summary = await readJobSummary("heartbeat-test", 0);
+      expect(summary.workerHealth.alive).toBe(true);
+      expect(summary.workerHealth.stale).toBe(true);
+      expect(summary.workerHealth.reason).toBe("alive_stale");
+      expect(summary.workerHealth.heartbeatAgeMs).toBeGreaterThan(30_000);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

@@ -72,9 +72,11 @@ Known generic error codes are `usage_error`, `invalid_flag`, `missing_json_flag`
 
 `job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
 
+Running workers refresh `worker-heartbeat.json` roughly once per second while the worker is active. `readJob` overlays it onto the returned job record as `workerHeartbeatAt`; `job list` includes `workerHeartbeatAt` and `workerAlive`; `job status` and `job summary` expose `workerHealth` with `alive`, `heartbeatAgeMs`, `stale`, and a reason such as `alive_recent`, `alive_stale`, or `dead`. This is an observability contract for callers. It does not by itself make stale-but-live workers eligible for deletion, replay, or automatic interruption.
+
 `job recover` reconciles persisted state with the detached worker. Queued jobs and jobs whose worker died before app-server thread creation are restarted. Jobs with an in-flight `threadId` / `turnId` are marked failed if their worker process is gone, because the current stdio app-server session cannot be safely resumed without risking duplicate execution.
 
-`job cancel` cancels a queued job immediately or appends one `turn.interrupt` control command for a running job. Repeated cancel requests return `action: "already_requested"` rather than enqueueing duplicate interrupts. While cancellation is pending, `job summary` exposes `cancelRequestedAt`, `cancelCommandId`, and `nextAction: "wait_cancel"`. The active worker sends app-server `turn/interrupt` on its existing stdio transport and waits for `turn/completed`. App-server `turn.status: "interrupted"` is exposed as job `status: "cancelled"`. If a running job has already lost its worker during an in-flight app-server turn, cancel marks the job failed instead of returning a false-success queued interrupt.
+`job cancel` cancels a queued job immediately or appends one `turn.interrupt` control command for a running job. Repeated cancel requests return `action: "already_requested"` rather than enqueueing duplicate interrupts. While cancellation is pending, `job summary` exposes `cancelRequestedAt`, `cancelCommandId`, and `nextAction: "wait_cancel"`. Running-job cancel metadata is recovered from append-only `control.jsonl` on reads, so stale worker writes to `job.json` cannot make agent-facing state forget a queued interrupt. The active worker sends app-server `turn/interrupt` on its existing stdio transport and waits for `turn/completed`. App-server `turn.status: "interrupted"` is exposed as job `status: "cancelled"`. If a running job has already lost its worker during an in-flight app-server turn, cancel marks the job failed instead of returning a false-success queued interrupt.
 
 `job rm` removes one local job record. By default it only removes terminal jobs: `completed`, `failed`, or `cancelled`. `--force` can remove unreadable or inactive non-terminal records, but still refuses any job with a live worker. `--dry-run` returns the same removal decision without deleting files.
 
@@ -84,7 +86,7 @@ Known generic error codes are `usage_error`, `invalid_flag`, `missing_json_flag`
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. `--max-ticks` is available for tests and bounded dogfood runs.
 
-`job summary` returns a single post-run object for agent callers: current job state, prompt, `nextAction`, pending and actionable approvals, whether approvals can be resolved, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. `--events <n>` controls the compact event tail size and defaults to 10. Use `--events 0` to omit the event tail while keeping diagnostics.
+`job summary` returns a single post-run object for agent callers: current job state, prompt, `nextAction`, worker health, pending and actionable approvals, whether approvals can be resolved, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. `--events <n>` controls the compact event tail size and defaults to 10. Use `--events 0` to omit the event tail while keeping diagnostics.
 
 `job events` and `job watch` support `--format raw` and `--format compact`. Raw mode emits the persisted app-server event log exactly as JSON Lines. Compact mode emits only agent-useful lifecycle events: worker/control events, thread and turn starts, approval requests, command starts/completions, failed MCP startup notifications, warnings, app-server errors, completed assistant messages, and turn completions. Server-derived compact events include thread/turn identifiers when app-server provides them. Compact mode filters streaming token deltas and reasoning deltas.
 
@@ -93,6 +95,7 @@ Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local j
 The persisted files live in `.codexctl/jobs/<job-key>/`:
 
 - `job.json`: latest job state.
+- `worker-heartbeat.json`: latest worker heartbeat, overlaid onto job reads.
 - `events.jsonl`: JSON Lines event log.
 - `control.jsonl`: append-only command inbox for steering, cancellation, and approval decisions.
 - `worker.log`: detached worker stdout.

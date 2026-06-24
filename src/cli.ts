@@ -18,6 +18,7 @@ import {
   runJobWorker,
   startJob,
   sweepJobs,
+  workerHealth,
 } from "./job.ts";
 import { readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
 
@@ -111,6 +112,9 @@ export async function main(argv: string[]): Promise<void> {
     await printJson({
       key: job.key,
       status: job.status,
+      workerPid: job.workerPid,
+      workerHeartbeatAt: job.workerHeartbeatAt,
+      workerHealth: workerHealth(job),
       threadId: job.threadId,
       turnId: job.turnId,
       updatedAt: job.updatedAt,

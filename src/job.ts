@@ -28,6 +28,7 @@ export type JobRecord = {
   startedAt: string | null;
   completedAt: string | null;
   workerPid: number | null;
+  workerHeartbeatAt: string | null;
   threadId: string | null;
   turnId: string | null;
   cancelRequestedAt: string | null;
@@ -132,6 +133,8 @@ export type JobListItem = {
   status: JobStatus | "unreadable";
   updatedAt: string | null;
   workerPid: number | null;
+  workerHeartbeatAt: string | null;
+  workerAlive: boolean | null;
   threadId: string | null;
   turnId: string | null;
   pendingApprovals: number;
@@ -152,6 +155,7 @@ export type JobSummary = {
   startedAt: string | null;
   completedAt: string | null;
   workerPid: number | null;
+  workerHealth: WorkerHealth;
   threadId: string | null;
   turnId: string | null;
   cancelRequestedAt: string | null;
@@ -164,6 +168,15 @@ export type JobSummary = {
   error: string | null;
   diagnostics: JobSummaryDiagnostics;
   recentEvents: CompactJobEvent[];
+};
+
+export type WorkerHealth = {
+  pid: number | null;
+  alive: boolean;
+  heartbeatAt: string | null;
+  heartbeatAgeMs: number | null;
+  stale: boolean;
+  reason: "terminal" | "queued" | "no_worker_pid" | "alive_recent" | "alive_stale" | "dead";
 };
 
 export type JobSummaryDiagnostics = {
@@ -182,6 +195,9 @@ export type JobSummaryDiagnostics = {
   lastError: Extract<CompactJobEvent, { type: "app_server.error" }> | null;
   lastFailedCommand: Extract<CompactJobEvent, { type: "command.completed" }> | null;
 };
+
+const WORKER_HEARTBEAT_INTERVAL_MS = 1_000;
+const WORKER_HEARTBEAT_STALE_MS = 30_000;
 
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
@@ -228,7 +244,7 @@ export async function listJobs(): Promise<JobListItem[]> {
     .filter((entry) => entry.isDirectory())
     .map(async (entry): Promise<JobListItem> => {
       try {
-        const job = normalizeJobRecord(await Bun.file(join(root, entry.name, "job.json")).json(), entry.name);
+        const job = await readPersistedJobRecord(join(root, entry.name), entry.name);
         return summarizeJob(job);
       } catch (error) {
         return {
@@ -236,6 +252,8 @@ export async function listJobs(): Promise<JobListItem[]> {
           status: "unreadable",
           updatedAt: null,
           workerPid: null,
+          workerHeartbeatAt: null,
+          workerAlive: null,
           threadId: null,
           turnId: null,
           pendingApprovals: 0,
@@ -381,13 +399,13 @@ export async function cancelJob(key: string): Promise<JobCancelResult> {
   job.cancelRequestedAt = now;
   job.cancelCommandId = command.id;
   job.updatedAt = now;
-  await writeJobRecord(dir, job);
   await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
   await appendEvent(dir, {
     direction: "control",
     command,
     at: now,
   });
+  await writeJobRecord(dir, job);
   return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
 }
 
@@ -418,6 +436,7 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
     startedAt: null,
     completedAt: null,
     workerPid: null,
+    workerHeartbeatAt: null,
     threadId: null,
     turnId: null,
     cancelRequestedAt: null,
@@ -442,9 +461,11 @@ async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "star
   proc.unref();
   record.status = "running";
   record.workerPid = proc.pid;
+  record.workerHeartbeatAt = new Date().toISOString();
   record.completedAt = null;
   record.updatedAt = new Date().toISOString();
   await writeJobRecord(dir, record);
+  await writeWorkerHeartbeat(dir, record);
   await appendEvent(dir, {
     direction: "worker",
     event: { type: "worker.spawned", pid: proc.pid, reason },
@@ -460,7 +481,9 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   record.startedAt ??= new Date().toISOString();
   record.updatedAt = new Date().toISOString();
   record.workerPid ??= process.pid;
-  await writeJobRecord(dir, record);
+  record.workerHeartbeatAt = new Date().toISOString();
+  await writeWorkerJobRecord(dir, record);
+  await writeWorkerHeartbeat(dir, record);
   await appendEvent(dir, {
     direction: "worker",
     event: { type: "worker.started", pid: process.pid },
@@ -468,10 +491,13 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   });
 
   const processedControlIds = new Set<string>();
+  const heartbeatTimer = setInterval(() => {
+    void refreshWorkerHeartbeat(record, dir).catch(() => undefined);
+  }, WORKER_HEARTBEAT_INTERVAL_MS);
   const client = new AppServerClient(async (event) => {
     await appendEvent(dir, event);
     updateRecordFromEvent(record, event);
-    await writeJobRecord(dir, record);
+    await writeWorkerJobRecord(dir, record);
   });
 
   try {
@@ -501,7 +527,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     const turnId = turnResult.turn?.id;
     if (!turnId) throw new Error("turn/start response did not include turn.id");
     record.turnId = turnId;
-    await writeJobRecord(dir, record);
+    await writeWorkerJobRecord(dir, record);
 
     await Promise.race([
       waitForTurnCompletion(record, client, dir, processedControlIds),
@@ -517,9 +543,10 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     record.error = error instanceof Error ? error.message : String(error);
     record.completedAt = new Date().toISOString();
     record.updatedAt = new Date().toISOString();
-    await writeJobRecord(dir, record);
+    await writeWorkerJobRecord(dir, record);
     throw error;
   } finally {
+    clearInterval(heartbeatTimer);
     await client.close();
     await appendEvent(dir, {
       direction: "worker",
@@ -530,8 +557,8 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 }
 
 export async function readJob(key: string): Promise<JobRecord> {
-  const path = `${jobDir(process.cwd(), key)}/job.json`;
-  return normalizeJobRecord(await Bun.file(path).json(), key);
+  const dir = jobDir(process.cwd(), key);
+  return await readPersistedJobRecord(dir, key);
 }
 
 export async function readJobEvents(key: string): Promise<unknown[]> {
@@ -566,6 +593,7 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     workerPid: job.workerPid,
+    workerHealth: workerHealth(job),
     threadId: job.threadId,
     turnId: job.turnId,
     cancelRequestedAt: job.cancelRequestedAt,
@@ -765,7 +793,7 @@ async function processControlCommands(
       record.cancelRequestedAt ??= command.at;
       record.cancelCommandId ??= command.id;
       record.updatedAt = new Date().toISOString();
-      await writeJobRecord(dir, record);
+      await writeWorkerJobRecord(dir, record);
       if (!record.threadId || !record.turnId) {
         await appendEvent(dir, {
           direction: "worker",
@@ -814,7 +842,7 @@ async function resolveApprovalCommand(
     approval.resolvedAt = new Date().toISOString();
     approval.decision = command.decision;
     record.updatedAt = new Date().toISOString();
-    await writeJobRecord(dir, record);
+    await writeWorkerJobRecord(dir, record);
     await appendEvent(dir, {
       direction: "worker",
       event: { type: "approval.unsupported", commandId: command.id, approvalId: approval.id, method: approval.method, error: result.error },
@@ -828,7 +856,7 @@ async function resolveApprovalCommand(
   approval.decision = command.decision;
   approval.resolvedAt = new Date().toISOString();
   record.updatedAt = new Date().toISOString();
-  await writeJobRecord(dir, record);
+  await writeWorkerJobRecord(dir, record);
   await appendEvent(dir, {
     direction: "worker",
     event: { type: "approval.resolved", commandId: command.id, approvalId: approval.id, decision: command.decision },
@@ -964,12 +992,82 @@ async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
   await Bun.write(`${dir}/job.json`, JSON.stringify(record, null, 2) + "\n");
 }
 
+async function writeWorkerJobRecord(dir: string, record: JobRecord): Promise<void> {
+  await mergePersistedControlFields(dir, record);
+  await writeJobRecord(dir, record);
+}
+
+async function mergePersistedControlFields(dir: string, record: JobRecord): Promise<void> {
+  try {
+    const latest = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), record.key);
+    record.cancelRequestedAt = latest.cancelRequestedAt ?? record.cancelRequestedAt;
+    record.cancelCommandId = latest.cancelCommandId ?? record.cancelCommandId;
+  } catch {
+    return;
+  }
+}
+
+async function refreshWorkerHeartbeat(record: JobRecord, dir: string): Promise<void> {
+  const now = Date.now();
+  const previous = record.workerHeartbeatAt ? Date.parse(record.workerHeartbeatAt) : 0;
+  if (Number.isFinite(previous) && now - previous < WORKER_HEARTBEAT_INTERVAL_MS) return;
+  record.workerHeartbeatAt = new Date(now).toISOString();
+  await writeWorkerHeartbeat(dir, record);
+}
+
+async function writeWorkerHeartbeat(dir: string, record: JobRecord): Promise<void> {
+  await Bun.write(`${dir}/worker-heartbeat.json`, JSON.stringify({
+    workerPid: record.workerPid,
+    workerHeartbeatAt: record.workerHeartbeatAt,
+  }, null, 2) + "\n");
+}
+
+async function readPersistedJobRecord(dir: string, key: string): Promise<JobRecord> {
+  const record = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), key);
+  await overlayCancelRequest(record, dir);
+  return await overlayWorkerHeartbeat(record, dir);
+}
+
+async function overlayCancelRequest(record: JobRecord, dir: string): Promise<void> {
+  const file = Bun.file(`${dir}/control.jsonl`);
+  if (!(await file.exists())) return;
+  try {
+    const text = await file.text();
+    for (const line of text.split("\n")) {
+      if (line.trim().length === 0) continue;
+      const command = JSON.parse(line) as Partial<ControlCommand>;
+      if (command.type !== "turn.interrupt") continue;
+      if (typeof command.at === "string") record.cancelRequestedAt = command.at;
+      if (typeof command.id === "string") record.cancelCommandId = command.id;
+      return;
+    }
+  } catch {
+    return;
+  }
+}
+
+async function overlayWorkerHeartbeat(record: JobRecord, dir: string): Promise<JobRecord> {
+  const file = Bun.file(`${dir}/worker-heartbeat.json`);
+  if (!(await file.exists())) return record;
+  try {
+    const heartbeat = await file.json();
+    if (isObject(heartbeat) && typeof heartbeat.workerHeartbeatAt === "string") {
+      record.workerHeartbeatAt = heartbeat.workerHeartbeatAt;
+    }
+  } catch {
+    return record;
+  }
+  return record;
+}
+
 function summarizeJob(job: JobRecord): JobListItem {
   return {
     key: job.key,
     status: job.status,
     updatedAt: job.updatedAt,
     workerPid: job.workerPid,
+    workerHeartbeatAt: job.workerHeartbeatAt,
+    workerAlive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
     threadId: job.threadId,
     turnId: job.turnId,
     pendingApprovals: job.approvals.filter((approval) => approval.status === "pending").length,
@@ -1081,6 +1179,7 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
     completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
     workerPid: typeof value.workerPid === "number" ? value.workerPid : null,
+    workerHeartbeatAt: typeof value.workerHeartbeatAt === "string" ? value.workerHeartbeatAt : null,
     threadId: typeof value.threadId === "string" ? value.threadId : null,
     turnId: typeof value.turnId === "string" ? value.turnId : null,
     cancelRequestedAt: typeof value.cancelRequestedAt === "string" ? value.cancelRequestedAt : null,
@@ -1124,6 +1223,58 @@ function isProcessAlive(pid: number | null): boolean {
   } catch {
     return false;
   }
+}
+
+export function workerHealth(job: JobRecord): WorkerHealth {
+  if (isTerminalStatus(job.status)) {
+    return {
+      pid: job.workerPid,
+      alive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
+      heartbeatAt: job.workerHeartbeatAt,
+      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
+      stale: false,
+      reason: "terminal",
+    };
+  }
+  if (job.status === "queued") {
+    return {
+      pid: job.workerPid,
+      alive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
+      heartbeatAt: job.workerHeartbeatAt,
+      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
+      stale: false,
+      reason: "queued",
+    };
+  }
+  if (job.workerPid === null) {
+    return {
+      pid: null,
+      alive: false,
+      heartbeatAt: job.workerHeartbeatAt,
+      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
+      stale: true,
+      reason: "no_worker_pid",
+    };
+  }
+
+  const alive = isProcessAlive(job.workerPid);
+  const age = heartbeatAgeMs(job.workerHeartbeatAt);
+  const stale = !alive || age === null || age > WORKER_HEARTBEAT_STALE_MS;
+  return {
+    pid: job.workerPid,
+    alive,
+    heartbeatAt: job.workerHeartbeatAt,
+    heartbeatAgeMs: age,
+    stale,
+    reason: alive ? (stale ? "alive_stale" : "alive_recent") : "dead",
+  };
+}
+
+function heartbeatAgeMs(heartbeatAt: string | null): number | null {
+  if (!heartbeatAt) return null;
+  const timestamp = Date.parse(heartbeatAt);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Date.now() - timestamp);
 }
 
 function isErrorWithCode(value: unknown): value is { code: string } {

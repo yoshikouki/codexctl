@@ -27,11 +27,13 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 
 `job events` and `job watch` default to `--format raw` for full-fidelity replay. Use `--format compact` when an agent or human only needs lifecycle events such as thread/turn start, command execution, approval requests, warnings, app-server errors, completed assistant messages, and turn completion.
 
-`job summary` is the quickest post-run view for agents: it returns the current job record, `nextAction`, pending and actionable approvals, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. Use `--events 0` when the caller wants the stable summary fields without the event tail.
+`job summary` is the quickest post-run view for agents: it returns the current job record, `nextAction`, worker health, pending and actionable approvals, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. Use `--events 0` when the caller wants the stable summary fields without the event tail.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
 
 `job cancel` marks queued jobs as `cancelled` immediately. For running jobs, it appends a `turn.interrupt` control command once; repeated cancel requests return `already_requested`. While the interrupt is pending, `job summary` returns `nextAction: "wait_cancel"` with `cancelRequestedAt` and `cancelCommandId`. The active worker sends app-server `turn/interrupt` on the same stdio connection and the job becomes `cancelled` when app-server completes the turn as interrupted. If the worker is already gone for an in-flight app-server turn, cancel marks the job failed instead of queuing an unreachable interrupt.
+
+Running workers refresh `worker-heartbeat.json`, which is overlaid onto job reads as `workerHeartbeatAt`. `job list` exposes the last heartbeat and whether the worker PID is alive; `job status` and `job summary.workerHealth` also expose whether the heartbeat is stale and the reason. Heartbeat staleness is an observation signal for agents and supervisors; it is not yet an automatic kill or replay policy.
 
 `job rm` and `job prune` only clean local `.codexctl/jobs` records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
 
