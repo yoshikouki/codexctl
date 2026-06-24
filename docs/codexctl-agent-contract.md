@@ -11,7 +11,7 @@ The public model is `Job`, not app-server `Thread`.
 - It is not a replacement for Codex.
 - It is not a generic agent framework.
 - It does not hide Codex approvals or permissions.
-- The PoC does not yet provide a long-running supervisor.
+- The supervisor does not replace per-job app-server workers; it reconciles persisted job state.
 
 ## Resources
 
@@ -41,6 +41,10 @@ codexctl approval list demo --json
 codexctl approval show demo <approval-id> --json
 codexctl approval approve demo <approval-id> --json
 codexctl approval reject demo <approval-id> --json
+codexctl supervisor once --json
+codexctl supervisor run --interval-ms 1000 --json
+codexctl supervisor status --json
+codexctl supervisor events --json
 codexctl job result demo --json
 ```
 
@@ -54,6 +58,8 @@ codexctl job result demo --json
 
 `job list` summarizes local job records. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
+`supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. `--max-ticks` is available for tests and bounded dogfood runs.
+
 Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local job records are not overwritten unless callers pass `--force`.
 
 The persisted files live in `.codexctl/jobs/<job-key>/`:
@@ -63,6 +69,11 @@ The persisted files live in `.codexctl/jobs/<job-key>/`:
 - `control.jsonl`: append-only command inbox for steering.
 - `worker.log`: detached worker stdout.
 - `worker.err.log`: detached worker stderr.
+
+Supervisor files live in `.codexctl/supervisor/`:
+
+- `state.json`: latest supervisor status, pid, tick count, and last tick.
+- `events.jsonl`: append-only supervisor lifecycle and tick events.
 
 Approval server requests are copied into `job.json.approvals`. Approval decisions are appended to `control.jsonl`; the worker translates them into the correct JSON-RPC response for supported app-server methods.
 
@@ -80,4 +91,4 @@ A later supervisor can replace the one-worker-per-job model. The command contrac
 
 - `item/permissions/requestApproval` denial is not mapped because the current app-server schema exposes only a permission grant response.
 - In-flight app-server stdio sessions cannot yet be resumed after worker loss; `job recover` marks them failed rather than replaying the prompt.
-- The app-server process is still one worker-owned stdio process per active job; long-running jobs need a supervisor.
+- The app-server process is still one worker-owned stdio process per active job.

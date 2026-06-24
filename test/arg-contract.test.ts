@@ -14,6 +14,7 @@ import {
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
+import { readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
 
 describe("approval protocol", () => {
   test("maps permissions approval to a scoped permission grant", () => {
@@ -260,6 +261,36 @@ describe("job control files", () => {
       expect(sweep).toHaveLength(1);
       expect(sweep[0]?.job.key).toBe("stale-job");
       expect(sweep[0]?.action).toBe("failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("supervisor", () => {
+  test("runSupervisor once sweeps active jobs and records state", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "supervisor-stale", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/supervisor-stale/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const state = await runSupervisor({ intervalMs: 1, once: true });
+      expect(state.status).toBe("stopped");
+      expect(state.tickCount).toBe(1);
+      expect(state.lastTick?.recovered).toHaveLength(1);
+      expect(state.lastTick?.recovered[0]?.job.key).toBe("supervisor-stale");
+      expect((await readSupervisorState()).tickCount).toBe(1);
+      expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
+      expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

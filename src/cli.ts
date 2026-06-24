@@ -14,6 +14,7 @@ import {
   startJob,
   sweepJobs,
 } from "./job.ts";
+import { readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
 
 type Args = {
   positionals: string[];
@@ -116,6 +117,28 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "once") {
+    await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), once: true }));
+    return;
+  }
+
+  if (resource === "supervisor" && action === "run") {
+    await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
+    return;
+  }
+
+  if (resource === "supervisor" && action === "status") {
+    await printJson(await readSupervisorState());
+    return;
+  }
+
+  if (resource === "supervisor" && action === "events") {
+    for (const event of await readSupervisorEvents()) {
+      console.log(JSON.stringify(event));
+    }
+    return;
+  }
+
   if (resource === "internal" && action === "worker" && key) {
     await runJobWorker(key);
     return;
@@ -178,6 +201,20 @@ function sandboxFlag(args: Args): "read-only" | "workspace-write" | "danger-full
   throw new Error("--sandbox must be one of: read-only, workspace-write, danger-full-access");
 }
 
+function intervalMsFlag(args: Args): number {
+  return numberFlag(args, "interval-ms") ?? 1000;
+}
+
+function numberFlag(args: Args, name: string): number | null {
+  const value = stringFlag(args, name);
+  if (value === null) return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
 async function printJson(value: unknown): Promise<void> {
   await Bun.write(Bun.stdout, JSON.stringify(value, null, 2) + "\n");
 }
@@ -197,6 +234,10 @@ function usage(): void {
   codexctl approval show <job-key> <approval-id> --json
   codexctl approval approve <job-key> <approval-id> [--for-session] --json
   codexctl approval reject <job-key> <approval-id> [--cancel] --json
+  codexctl supervisor once [--interval-ms <ms>] --json
+  codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
+  codexctl supervisor status --json
+  codexctl supervisor events --json
   codexctl job result <key> --json`);
 }
 
