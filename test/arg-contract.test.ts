@@ -20,7 +20,14 @@ import {
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
-import { planSupervisorActions, readSupervisorActionHistory, readSupervisorEvents, readSupervisorState, runSupervisor } from "../src/supervisor.ts";
+import {
+  inspectSupervisorAction,
+  planSupervisorActions,
+  readSupervisorActionHistory,
+  readSupervisorEvents,
+  readSupervisorState,
+  runSupervisor,
+} from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 
@@ -1055,6 +1062,50 @@ describe("supervisor", () => {
       const cli = await runCli(["supervisor", "plan", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
       expect(JSON.parse(cli.stdout).actions).toHaveLength(10);
+
+      const approvalInspection = await inspectSupervisorAction("approval-plan", "resolve_approval");
+      expect(approvalInspection.readOnly).toBe(true);
+      expect(approvalInspection.action.nextCommand).toBe("codexctl approval list approval-plan --json");
+      expect(approvalInspection.inspection.type).toBe("approval_list");
+      if (approvalInspection.inspection.type !== "approval_list") throw new Error("expected approval list inspection");
+      expect(approvalInspection.inspection.approvals).toHaveLength(1);
+
+      const failedInspection = await inspectSupervisorAction("failed-plan", "inspect_error");
+      expect(failedInspection.action.policy?.recommendation).toBe("inspect");
+      expect(failedInspection.inspection.type).toBe("job_summary");
+      if (failedInspection.inspection.type !== "job_summary") throw new Error("expected job summary inspection");
+      expect(failedInspection.inspection.eventLimit).toBe(20);
+      expect(failedInspection.inspection.summary.error).toBe("boom");
+
+      const unreadableInspection = await inspectSupervisorAction("unreadable-plan", "inspect_unreadable");
+      expect(unreadableInspection.inspection.type).toBe("unreadable_job");
+      if (unreadableInspection.inspection.type !== "unreadable_job") throw new Error("expected unreadable job inspection");
+      expect(unreadableInspection.inspection.error).toContain("JSON");
+
+      const inspectCli = await runCli(["supervisor", "inspect", "failed-plan", "--kind", "inspect_error", "--json"], tmp);
+      expect(inspectCli.exitCode).toBe(0);
+      expect(inspectCli.stderr).toBe("");
+      expect(JSON.parse(inspectCli.stdout).inspection.summary.error).toBe("boom");
+
+      const missingAction = await runCli(["supervisor", "inspect", "failed-plan", "--kind", "wait_cancel", "--json"], tmp);
+      expect(missingAction.exitCode).toBe(2);
+      expect(JSON.parse(missingAction.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "supervisor_action_not_found",
+          message: "No supervisor action 'wait_cancel' for job 'failed-plan'",
+        },
+      });
+
+      const invalidKind = await runCli(["supervisor", "inspect", "failed-plan", "--kind", "recover", "--json"], tmp);
+      expect(invalidKind.exitCode).toBe(2);
+      expect(JSON.parse(invalidKind.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "invalid_flag",
+          message: "--kind must be one of: resolve_approval, wait_cancel, inspect_error, inspect_stale_worker, inspect_dead_worker, inspect_unreadable",
+        },
+      });
     } finally {
       Date.now = realDateNow;
       process.chdir(cwd);

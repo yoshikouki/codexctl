@@ -48,6 +48,7 @@ codexctl approval reject demo <approval-id> --json
 codexctl supervisor once --json
 codexctl supervisor plan --json
 codexctl supervisor actions --ticks 10 --json
+codexctl supervisor inspect demo --kind inspect_error --json
 codexctl supervisor run --interval-ms 1000 --json
 codexctl supervisor status --json
 codexctl supervisor events --json
@@ -89,6 +90,8 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 `supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command. Time-sensitive actions may include `ageMs` and `thresholdMs`: pending cancellation is `info` below 60 seconds, `attention` from 60 seconds, and `critical` from 5 minutes; stale worker heartbeat inspection becomes `critical` from 5 minutes. During `supervisor run`, actions may also include `firstSeenAt`, `seenTicks`, and `criticalSeenTicks`, derived by matching the current recommendation against the previous tick in the same run. Critical actions may include `policy`, a non-mutating controller hint with `recommendation: "inspect"` or `recommendation: "escalate"`, `reason`, `basedOn`, and optionally `thresholdTicks`. These fields are observational; they do not trigger automatic execution.
 
 `supervisor actions` scans `.codexctl/supervisor/events.jsonl` from the tail and returns bounded recent `supervisor.tick` action history. It includes `tickLimit`, `eventsScanned` for the tail lines inspected, `tickCount`, `latestTickAt`, `latestActions`, and `ticks[]` with each tick's action list and health summary. It is read-only: it does not sweep jobs, execute `nextCommand`, or apply policy recommendations.
+
+`supervisor inspect <job-key> --kind <action-kind>` validates that the current supervisor plan still contains the requested action, then returns typed read-only inspection data. `resolve_approval` returns `inspection.type: "approval_list"` with pending approvals. `wait_cancel`, `inspect_error`, `inspect_stale_worker`, and `inspect_dead_worker` return `inspection.type: "job_summary"` with the event tail size used for that action. `inspect_unreadable` returns `inspection.type: "unreadable_job"` with the plan error, without trying to parse the broken job record. This command does not execute the action's `nextCommand` shell string, resolve approvals, recover jobs, or mutate state. If the action is no longer current, stderr uses `supervisor_action_not_found`.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary and the same non-executing action plan so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 

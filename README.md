@@ -23,6 +23,7 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl approval approve demo <approval-id> --json` resolves a pending approval.
 - `codexctl supervisor plan --json` returns recommended next actions without executing them.
 - `codexctl supervisor actions --ticks 10 --json` reads recent supervisor action history.
+- `codexctl supervisor inspect demo --kind inspect_error --json` resolves one current supervisor action into typed read-only inspection data.
 - `codexctl supervisor run --interval-ms 1000 --json` keeps sweeping queued or running jobs.
 - `codexctl job result demo --json` reads the persisted result.
 - `codexctl job events demo --json` streams the persisted event log.
@@ -40,6 +41,8 @@ Running workers refresh `worker-heartbeat.json`, which is overlaid onto job read
 `supervisor plan` is time-aware for stuck-looking states. Waiting cancellation actions include `ageMs` and move from `info` to `attention` after 60 seconds and to `critical` after 5 minutes. Stale worker actions include heartbeat `ageMs` and become `critical` after 5 minutes. During `supervisor run`, actions also include `firstSeenAt`, `seenTicks`, and `criticalSeenTicks` when the same concrete recommendation is observed in adjacent ticks, so callers can tell whether it is persistent. Critical actions may include a non-mutating `policy` recommendation such as `inspect`, or `escalate` when a critical finding itself persists for 3 ticks. These are still recommendations only; `nextCommand` is not auto-executed.
 
 `supervisor actions` reads the append-only supervisor event log and returns the most recent tick action history. It does not sweep jobs, run policy, or mutate state. Use `--ticks <n>` to bound how much history a controller reads before deciding whether to inspect, escalate, or keep waiting.
+
+`supervisor inspect` checks the current supervisor plan for a specific `jobKey` and action `kind`, then returns typed read-only inspection data. Approval actions return pending approvals, most inspection actions return `job summary`, and unreadable job actions return the plan error without trying to parse the broken job record. It does not execute the `nextCommand` shell string, resolve approvals, recover jobs, or mutate state.
 
 `job rm` and `job prune` only clean local `.codexctl/jobs` records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
 

@@ -20,7 +20,15 @@ import {
   sweepJobs,
   workerHealth,
 } from "./job.ts";
-import { planSupervisorActions, readSupervisorActionHistory, readSupervisorEvents, readSupervisorState, runSupervisor } from "./supervisor.ts";
+import {
+  inspectSupervisorAction,
+  planSupervisorActions,
+  readSupervisorActionHistory,
+  readSupervisorEvents,
+  readSupervisorState,
+  runSupervisor,
+  type SupervisorActionKind,
+} from "./supervisor.ts";
 
 type Args = {
   positionals: string[];
@@ -51,6 +59,7 @@ const knownPublicFlags = [
   "interval-ms",
   "json",
   "keep",
+  "kind",
   "key",
   "max-ticks",
   "model",
@@ -241,6 +250,13 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "inspect" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json", "kind"]);
+    await printJson(await inspectSupervisorAction(key, supervisorActionKindFlag(args)));
+    return;
+  }
+
   if (resource === "supervisor" && action === "run") {
     allowFlags(args, ["json", "interval-ms", "max-ticks"]);
     await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
@@ -364,6 +380,21 @@ function pruneStatusFlag(args: Args): "completed" | "failed" | "cancelled" | "te
   throw new CliError("invalid_flag", "--status must be one of: completed, failed, cancelled, terminal");
 }
 
+function supervisorActionKindFlag(args: Args): SupervisorActionKind {
+  const value = requiredString(args, "kind");
+  if (
+    value === "resolve_approval"
+    || value === "wait_cancel"
+    || value === "inspect_error"
+    || value === "inspect_stale_worker"
+    || value === "inspect_dead_worker"
+    || value === "inspect_unreadable"
+  ) {
+    return value;
+  }
+  throw new CliError("invalid_flag", "--kind must be one of: resolve_approval, wait_cancel, inspect_error, inspect_stale_worker, inspect_dead_worker, inspect_unreadable");
+}
+
 function intervalMsFlag(args: Args): number {
   return numberFlag(args, "interval-ms") ?? 1000;
 }
@@ -440,6 +471,7 @@ function usageText(): string {
   codexctl supervisor once [--interval-ms <ms>] --json
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
+  codexctl supervisor inspect <job-key> --kind <action-kind> --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json

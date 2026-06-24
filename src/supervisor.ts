@@ -1,7 +1,16 @@
 import { Buffer } from "node:buffer";
 import { appendFile, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
-import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from "./job.ts";
+import {
+  listJobs,
+  readApprovals,
+  readJobSummary,
+  sweepJobs,
+  type ApprovalRecord,
+  type JobListItem,
+  type JobRecoveryResult,
+  type JobSummary,
+} from "./job.ts";
 
 const HISTORY_READ_CHUNK_BYTES = 64 * 1024;
 const WAIT_CANCEL_ATTENTION_MS = 60_000;
@@ -49,9 +58,17 @@ export type SupervisorHealthSummary = {
   inspectError: number;
 };
 
+export type SupervisorActionKind =
+  | "resolve_approval"
+  | "wait_cancel"
+  | "inspect_error"
+  | "inspect_stale_worker"
+  | "inspect_dead_worker"
+  | "inspect_unreadable";
+
 export type SupervisorAction = {
   jobKey: string;
-  kind: "resolve_approval" | "wait_cancel" | "inspect_error" | "inspect_stale_worker" | "inspect_dead_worker" | "inspect_unreadable";
+  kind: SupervisorActionKind;
   severity: "info" | "attention" | "critical";
   reason: string;
   nextCommand: string;
@@ -62,6 +79,16 @@ export type SupervisorAction = {
   criticalSeenTicks?: number;
   policy?: SupervisorPolicyRecommendation;
 };
+
+export class SupervisorOperationError extends Error {
+  constructor(
+    readonly code: "supervisor_action_not_found",
+    message: string,
+    readonly exitCode = 2,
+  ) {
+    super(message);
+  }
+}
 
 export type SupervisorPolicyRecommendation = {
   recommendation: "inspect" | "escalate";
@@ -84,6 +111,29 @@ export type SupervisorRunOptions = {
   once?: boolean;
   maxTicks?: number;
 };
+
+export type SupervisorActionInspection = {
+  at: string;
+  planAt: string;
+  readOnly: true;
+  action: SupervisorAction;
+  inspection: SupervisorActionInspectionPayload;
+};
+
+export type SupervisorActionInspectionPayload =
+  | {
+    type: "approval_list";
+    approvals: ApprovalRecord[];
+  }
+  | {
+    type: "job_summary";
+    eventLimit: number;
+    summary: JobSummary;
+  }
+  | {
+    type: "unreadable_job";
+    error: string;
+  };
 
 export async function runSupervisor(options: SupervisorRunOptions): Promise<SupervisorState> {
   const dir = supervisorDir(process.cwd());
@@ -239,6 +289,48 @@ export async function planSupervisorActions(): Promise<{ at: string; health: Sup
     at,
     health: summarizeJobHealth(jobs),
     actions: annotatePolicyRecommendations(planJobActions(jobs)),
+  };
+}
+
+export async function inspectSupervisorAction(
+  jobKey: string,
+  kind: SupervisorActionKind,
+): Promise<SupervisorActionInspection> {
+  const plan = await planSupervisorActions();
+  const action = plan.actions.find((candidate) => candidate.jobKey === jobKey && candidate.kind === kind);
+  if (!action) {
+    throw new SupervisorOperationError(
+      "supervisor_action_not_found",
+      `No supervisor action '${kind}' for job '${jobKey}'`,
+    );
+  }
+  return {
+    at: new Date().toISOString(),
+    planAt: plan.at,
+    readOnly: true,
+    action,
+    inspection: await inspectActionPayload(action),
+  };
+}
+
+async function inspectActionPayload(action: SupervisorAction): Promise<SupervisorActionInspectionPayload> {
+  if (action.kind === "resolve_approval") {
+    return {
+      type: "approval_list",
+      approvals: await readApprovals(action.jobKey, false),
+    };
+  }
+  if (action.kind === "inspect_unreadable") {
+    return {
+      type: "unreadable_job",
+      error: action.reason,
+    };
+  }
+  const eventLimit = action.kind === "wait_cancel" ? 0 : 20;
+  return {
+    type: "job_summary",
+    eventLimit,
+    summary: await readJobSummary(action.jobKey, eventLimit),
   };
 }
 
