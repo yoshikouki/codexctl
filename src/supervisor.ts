@@ -37,6 +37,8 @@ export type SupervisorAction = {
   nextCommand: string;
   ageMs?: number | null;
   thresholdMs?: number | null;
+  firstSeenAt?: string;
+  seenTicks?: number;
 };
 
 export type SupervisorState = {
@@ -71,14 +73,16 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
     tickCount: 0,
     lastTick: null,
   };
+  let previousTick: SupervisorTick | null = null;
   await writeSupervisorState(dir, state);
   await appendSupervisorEvent(dir, { type: "supervisor.started", pid: process.pid, intervalMs: options.intervalMs });
 
   try {
     while (!stopRequested) {
-      const tick = await supervisorTick();
+      const tick = await supervisorTick(previousTick);
       state.tickCount++;
       state.lastTick = tick;
+      previousTick = tick;
       state.updatedAt = tick.at;
       await writeSupervisorState(dir, state);
       await appendSupervisorEvent(dir, { type: "supervisor.tick", tick });
@@ -123,20 +127,22 @@ export async function readSupervisorEvents(): Promise<unknown[]> {
 
 export async function planSupervisorActions(): Promise<{ at: string; health: SupervisorHealthSummary; actions: SupervisorAction[] }> {
   const jobs = await listJobs();
+  const at = new Date().toISOString();
   return {
-    at: new Date().toISOString(),
+    at,
     health: summarizeJobHealth(jobs),
     actions: planJobActions(jobs),
   };
 }
 
-async function supervisorTick(): Promise<SupervisorTick> {
+async function supervisorTick(previousTick: SupervisorTick | null): Promise<SupervisorTick> {
   const recovered = await sweepJobs();
   const jobs = await listJobs();
+  const at = new Date().toISOString();
   return {
-    at: new Date().toISOString(),
+    at,
     health: summarizeJobHealth(jobs),
-    actions: planJobActions(jobs),
+    actions: annotateActionPersistence(planJobActions(jobs), previousTick),
     recovered,
   };
 }
@@ -279,6 +285,37 @@ function thresholdForSeverity(
 
 function ageText(ageMs: number | null): string {
   return ageMs === null ? "" : ` for ${ageMs}ms`;
+}
+
+function annotateActionPersistence(
+  actions: SupervisorAction[],
+  previousTick: SupervisorTick | null,
+): SupervisorAction[] {
+  if (actions.length === 0 || previousTick === null) return actions;
+  const previousActions = new Map<string, SupervisorAction>();
+  for (const action of previousTick?.actions ?? []) {
+    const key = persistenceKey(action);
+    if (key !== null) previousActions.set(key, action);
+  }
+  return actions.map((action) => {
+    const key = persistenceKey(action);
+    const previous = key === null ? undefined : previousActions.get(key);
+    if (!previous) return action;
+    return {
+      ...action,
+      firstSeenAt: previous.firstSeenAt ?? previousTick.at,
+      seenTicks: previous ? (previous.seenTicks ?? 1) + 1 : 1,
+    };
+  });
+}
+
+function persistenceKey(action: SupervisorAction): string | null {
+  if (action.kind === "resolve_approval") return null;
+  if (action.kind === "wait_cancel") return `${action.jobKey}\u0000${action.kind}`;
+  if (action.kind === "inspect_error" || action.kind === "inspect_unreadable") {
+    return `${action.jobKey}\u0000${action.kind}\u0000${action.reason}`;
+  }
+  return `${action.jobKey}\u0000${action.kind}`;
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

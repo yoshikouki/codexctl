@@ -1017,6 +1017,8 @@ describe("supervisor", () => {
       expect(cancelAction?.kind).toBe("wait_cancel");
       expect(cancelAction?.severity).toBe("info");
       expect(cancelAction?.thresholdMs).toBe(60_000);
+      expect(cancelAction?.seenTicks).toBeUndefined();
+      expect(cancelAction?.firstSeenAt).toBeUndefined();
       const attentionCancelAction = plan.actions.find((action) => action.jobKey === "cancel-attention-plan");
       expect(attentionCancelAction?.kind).toBe("wait_cancel");
       expect(attentionCancelAction?.severity).toBe("attention");
@@ -1082,6 +1084,96 @@ describe("supervisor", () => {
       expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
       expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");
     } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("runSupervisor carries action persistence across ticks", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "persistent-cancel", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/persistent-cancel/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = new Date().toISOString();
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+      await Bun.write(
+        ".codexctl/jobs/persistent-cancel/control.jsonl",
+        JSON.stringify({ id: "persistent-cancel-command", type: "turn.interrupt", at: new Date().toISOString() }) + "\n",
+      );
+
+      const state = await runSupervisor({ intervalMs: 1, maxTicks: 2 });
+      expect(state.status).toBe("stopped");
+      expect(state.tickCount).toBe(2);
+      const lastAction = state.lastTick?.actions.find((action) => action.jobKey === "persistent-cancel");
+      expect(lastAction?.kind).toBe("wait_cancel");
+      expect(lastAction?.seenTicks).toBe(2);
+      expect(typeof lastAction?.firstSeenAt).toBe("string");
+
+      const tickEvents = (await readSupervisorEvents())
+        .filter((event): event is { type: "supervisor.tick"; tick: { at: string; actions: Array<{ firstSeenAt?: string; seenTicks?: number }> } } =>
+          (event as { type?: string }).type === "supervisor.tick"
+        );
+      expect(tickEvents).toHaveLength(2);
+      expect(tickEvents[0]?.tick.actions[0]?.seenTicks).toBeUndefined();
+      expect(tickEvents[0]?.tick.actions[0]?.firstSeenAt).toBeUndefined();
+      expect(tickEvents[1]?.tick.actions[0]?.seenTicks).toBe(2);
+      expect(tickEvents[1]?.tick.actions[0]?.firstSeenAt).toBe(tickEvents[0]?.tick.at);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("runSupervisor keeps action persistence across severity escalation", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const realDateNow = Date.now;
+    try {
+      process.chdir(tmp);
+      const fixedNow = realDateNow();
+      await createJob({ key: "escalating-cancel", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/escalating-cancel/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+      await Bun.write(
+        ".codexctl/jobs/escalating-cancel/control.jsonl",
+        JSON.stringify({ id: "escalating-cancel-command", type: "turn.interrupt", at: new Date(fixedNow - 299_000).toISOString() }) + "\n",
+      );
+
+      const nowValues = [fixedNow, fixedNow + 2_000];
+      let nowIndex = 0;
+      Date.now = () => nowValues[Math.min(nowIndex++, nowValues.length - 1)] ?? fixedNow;
+
+      const state = await runSupervisor({ intervalMs: 1, maxTicks: 2 });
+      const action = state.lastTick?.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
+      expect(action?.severity).toBe("critical");
+      expect(action?.seenTicks).toBe(2);
+      expect(typeof action?.firstSeenAt).toBe("string");
+
+      const tickEvents = (await readSupervisorEvents())
+        .filter((event): event is { type: "supervisor.tick"; tick: { actions: Array<{ jobKey?: string; kind?: string; severity?: string; seenTicks?: number }> } } =>
+          (event as { type?: string }).type === "supervisor.tick"
+        );
+      const firstWait = tickEvents[0]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
+      const secondWait = tickEvents[1]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
+      expect(firstWait?.severity).toBe("attention");
+      expect(firstWait?.seenTicks).toBeUndefined();
+      expect(secondWait?.severity).toBe("critical");
+      expect(secondWait?.seenTicks).toBe(2);
+    } finally {
+      Date.now = realDateNow;
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
     }
