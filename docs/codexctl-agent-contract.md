@@ -37,8 +37,8 @@ codexctl job summary demo --events 10 --json
 codexctl job wait demo --events 0 --timeout-ms 600000 --json
 codexctl job events demo --format compact --json
 codexctl job watch demo --format compact --json
-codexctl job steer demo --prompt "Narrow the answer." --json
-codexctl job cancel demo --json
+codexctl job steer demo --prompt "Narrow the answer." --wait --json
+codexctl job cancel demo --wait --json
 codexctl job rm demo --json
 codexctl job prune --keep 10 --status completed --dry-run --json
 codexctl job recover demo --json
@@ -100,6 +100,8 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 `job run` composes `job start --detach` and `job wait` into one command. It accepts the detached start flags (`--repo`, `--key`, `--prompt`, `--model`, `--approval-policy`, `--sandbox`, `--force`) plus wait flags (`--events`, `--interval-ms`, `--timeout-ms`). The response has `{ key, started, wait }`, where `started` is the worker record after spawn and `wait` is the same shape as `job wait`. It does not auto-resolve approvals; `wait.reason: "approval_required"` is the handoff point for approval commands.
 
 `approval approve --wait` and `approval reject --wait` return `{ command, wait }`. `command` is the queued approval resolve command, and `wait` is the same shape as `job wait`. The wait ignores the approval ID that was just enqueued, preventing a race where the caller immediately sees the same pending approval before the worker has processed `control.jsonl`. If a different approval appears, or if the job reaches terminal state, the wait returns normally. Timeout remains a non-error `ready: false` result.
+
+`job steer --wait` and `job cancel --wait` enqueue the same control command as their non-waiting forms, then return the same `job wait` shape. `steer --wait` returns `{ command, wait }`, where `command.type` is `turn.steer`. `cancel --wait` returns `{ cancel, wait }`, where `cancel` is the ordinary `job cancel` result. A running-job cancellation may still time out with `wait.nextAction: "wait_cancel"` while the worker is processing `turn/interrupt`; this is a bounded poll result, not an error.
 
 `supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. Every action has an `id` that is stable for the same job/action identity; `inspect_error` and `inspect_unreadable` IDs include a short hash of the reason so callers can distinguish changed failure causes, and `inspect_dead_worker` IDs include a short job-state fingerprint so stale apply IDs do not match a later dead-worker state. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command. Time-sensitive actions may include `ageMs` and `thresholdMs`: pending cancellation is `info` below 60 seconds, `attention` from 60 seconds, and `critical` from 5 minutes; stale worker heartbeat inspection becomes `critical` from 5 minutes. During `supervisor run`, actions may also include `firstSeenAt`, `seenTicks`, and `criticalSeenTicks`, derived by matching the current recommendation against the previous tick in the same run. Critical actions may include `policy`, a non-mutating controller hint with `recommendation: "inspect"` or `recommendation: "escalate"`, `reason`, `basedOn`, and optionally `thresholdTicks`. These fields are observational; they do not trigger automatic execution.
 

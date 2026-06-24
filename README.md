@@ -15,8 +15,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl job wait demo --timeout-ms 600000 --json` waits until a job is terminal or approval is required, then returns a summary.
 - `codexctl job watch demo --format compact --json` follows a compact lifecycle stream until the job is terminal.
 - `codexctl job watch demo --format raw --json` follows the raw persisted app-server event log.
-- `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
-- `codexctl job cancel demo --json` interrupts an active turn or cancels a queued job.
+- `codexctl job steer demo --prompt "..." --wait --json` appends a steering command for the worker, then waits for the next actionable summary.
+- `codexctl job cancel demo --wait --json` interrupts an active turn or cancels a queued job, then waits for the result.
 - `codexctl job rm demo --json` removes a terminal local job record.
 - `codexctl job prune --keep 10 --dry-run --json` previews completed job record cleanup.
 - `codexctl job recover demo --json` reconciles a queued or stale running job.
@@ -44,6 +44,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 `job run` is the one-command orchestration path for agents. It creates or replaces a job using the same options as `job start --detach`, then runs the same wait logic as `job wait`. The response includes `started` for the spawned worker record and `wait` for the actionable summary result. It does not auto-approve requests; if the wait result is `reason: "approval_required"`, use the approval commands and then `job wait` again.
 
 `approval approve --wait` and `approval reject --wait` enqueue an explicit approval decision, then wait again for a terminal job, a new approval, or timeout. The wait ignores the approval ID it just enqueued so it does not immediately return the same pre-worker pending approval while the worker is still processing `control.jsonl`.
+
+`job steer --wait` and `job cancel --wait` use the same `job wait` result shape after appending their control command. `steer --wait` returns `{ command, wait }`; `cancel --wait` returns `{ cancel, wait }`. The wait does not make steering or cancellation synchronous at the app-server transport level: timeout remains a normal `ready: false` poll result, and approval requests still return through `wait.reason: "approval_required"`.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
 

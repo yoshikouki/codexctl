@@ -3,9 +3,11 @@ import { readDaemonVersion } from "./app-server.ts";
 import { compactJobEvent } from "./events.ts";
 import {
   cancelJob,
+  cancelJobAndWait,
   enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
+  enqueueSteerAndWait,
   listJobs,
   readApproval,
   readApprovals,
@@ -210,14 +212,23 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "steer" && key) {
-    allowFlags(args, ["json", "prompt"]);
-    await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
+    allowFlags(args, ["json", "prompt", "wait", "events", "interval-ms", "timeout-ms"]);
+    const prompt = requiredString(args, "prompt");
+    if (booleanFlag(args, "wait")) {
+      await printJson(await enqueueSteerAndWait(key, prompt, waitOptionsFromFlags(args)));
+    } else {
+      await printJson(await enqueueSteer(key, prompt));
+    }
     return;
   }
 
   if (resource === "job" && action === "cancel" && key) {
-    allowFlags(args, ["json"]);
-    await printJson(await cancelJob(key));
+    allowFlags(args, ["json", "wait", "events", "interval-ms", "timeout-ms"]);
+    if (booleanFlag(args, "wait")) {
+      await printJson(await cancelJobAndWait(key, waitOptionsFromFlags(args)));
+    } else {
+      await printJson(await cancelJob(key));
+    }
     return;
   }
 
@@ -565,8 +576,8 @@ function usageText(): string {
   codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
   codexctl job events <key> [--format raw|compact] --json
   codexctl job watch <key> [--format raw|compact] --json
-  codexctl job steer <key> --prompt <prompt> --json
-  codexctl job cancel <key> --json
+  codexctl job steer <key> --prompt <prompt> [--wait] --json
+  codexctl job cancel <key> [--wait] --json
   codexctl job rm <key> [--force] [--dry-run] --json
   codexctl job prune [--keep <n>] [--status completed|failed|cancelled|terminal] [--dry-run] --json
   codexctl job recover <key> --json

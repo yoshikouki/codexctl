@@ -266,6 +266,16 @@ export type ApprovalDecisionAndWaitResult = {
   wait: JobWaitResult;
 };
 
+export type SteerAndWaitResult = {
+  command: TurnSteerCommand;
+  wait: JobWaitResult;
+};
+
+export type CancelAndWaitResult = {
+  cancel: JobCancelResult;
+  wait: JobWaitResult;
+};
+
 export type WorkerHealth = {
   pid: number | null;
   alive: boolean;
@@ -587,6 +597,14 @@ export async function cancelJob(key: string): Promise<JobCancelResult> {
   });
 }
 
+export async function cancelJobAndWait(key: string, options: JobWaitOptions = {}): Promise<CancelAndWaitResult> {
+  const cancel = await cancelJob(key);
+  return {
+    cancel,
+    wait: await waitForJob(key, options),
+  };
+}
+
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
   const root = process.cwd();
@@ -906,13 +924,13 @@ export async function enqueueApprovalDecisionAndWait(
   };
 }
 
-export async function enqueueSteer(key: string, prompt: string): Promise<ControlCommand> {
+export async function enqueueSteer(key: string, prompt: string): Promise<TurnSteerCommand> {
   const dir = jobDir(process.cwd(), key);
   const job = await readJob(key);
   if (job.status !== "running") {
     throw new Error(`Job '${key}' is ${job.status}; only running jobs can be steered`);
   }
-  const command: ControlCommand = {
+  const command: TurnSteerCommand = {
     id: crypto.randomUUID(),
     type: "turn.steer",
     at: new Date().toISOString(),
@@ -925,6 +943,14 @@ export async function enqueueSteer(key: string, prompt: string): Promise<Control
     at: new Date().toISOString(),
   });
   return command;
+}
+
+export async function enqueueSteerAndWait(key: string, prompt: string, options: JobWaitOptions = {}): Promise<SteerAndWaitResult> {
+  const command = await enqueueSteer(key, prompt);
+  return {
+    command,
+    wait: await waitForJob(key, options),
+  };
 }
 
 export async function readApprovals(key: string, includeResolved = false): Promise<ApprovalRecord[]> {

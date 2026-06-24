@@ -7,10 +7,12 @@ import { compactJobEvent } from "../src/events.ts";
 import {
   approvalResponseFor,
   cancelJob,
+  cancelJobAndWait,
   createJob,
   enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
+  enqueueSteerAndWait,
   jobRecoveryStateId,
   listJobs,
   readApprovals,
@@ -912,6 +914,19 @@ describe("event store", () => {
       const cli = await runCli(["job", "cancel", "cancel-running-test", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
       expect(JSON.parse(cli.stdout).action).toBe("already_requested");
+
+      const waitCli = await runCli(["job", "cancel", "cancel-running-test", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
+      expect(waitCli.exitCode).toBe(0);
+      expect(JSON.parse(waitCli.stdout)).toMatchObject({
+        cancel: {
+          action: "already_requested",
+        },
+        wait: {
+          ready: false,
+          reason: "timeout",
+          nextAction: "wait_cancel",
+        },
+      });
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -1147,6 +1162,31 @@ describe("job control files", () => {
       const command = await enqueueSteer("steer-test", "adjust");
       expect(command.type).toBe("turn.steer");
       expect(await Bun.file(".codexctl/jobs/steer-test/control.jsonl").text()).toContain("adjust");
+
+      const waited = await enqueueSteerAndWait("steer-test", "wait-adjust", {
+        eventLimit: 0,
+        intervalMs: 1,
+        timeoutMs: 1,
+      });
+      expect(waited.command.type).toBe("turn.steer");
+      expect(waited.wait).toMatchObject({
+        ready: false,
+        reason: "timeout",
+        nextAction: "wait",
+      });
+
+      const cli = await runCli(["job", "steer", "steer-test", "--prompt", "cli-adjust", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout)).toMatchObject({
+        command: {
+          type: "turn.steer",
+        },
+        wait: {
+          ready: false,
+          reason: "timeout",
+          nextAction: "wait",
+        },
+      });
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -1166,6 +1206,20 @@ describe("job control files", () => {
       expect(result.job.error).toBeNull();
       expect((await readJobSummary("cancel-queued-test", 0)).nextAction).toBe("cancelled");
       expect(await Bun.file(".codexctl/jobs/cancel-queued-test/events.jsonl").text()).toContain("job.cancelled");
+
+      await createJob({ key: "cancel-queued-wait-test", repo: ".", prompt: "hello" });
+      const waited = await cancelJobAndWait("cancel-queued-wait-test", {
+        eventLimit: 0,
+        intervalMs: 1,
+        timeoutMs: 10,
+      });
+      expect(waited.cancel.action).toBe("cancelled");
+      expect(waited.wait).toMatchObject({
+        ready: true,
+        reason: "terminal",
+        status: "cancelled",
+        nextAction: "cancelled",
+      });
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
