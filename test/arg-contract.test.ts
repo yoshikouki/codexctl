@@ -8,6 +8,7 @@ import {
   approvalResponseFor,
   cancelJob,
   createJob,
+  enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
   jobRecoveryStateId,
@@ -705,6 +706,111 @@ describe("event store", () => {
       expect(command.type).toBe("approval.resolve");
       expect(await readApprovals("approval-test")).toHaveLength(1);
       expect(await Bun.file(".codexctl/jobs/approval-test/control.jsonl").text()).toContain("approval.resolve");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("approval wait ignores the approval it just enqueued", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "approval-wait-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/approval-wait-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.approvals.push({
+        id: "approval-1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: { command: "true" },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const result = await enqueueApprovalDecisionAndWait("approval-wait-test", "approval-1", "approve", {
+        eventLimit: 0,
+        intervalMs: 1,
+        timeoutMs: 1,
+      });
+      expect(result.command.type).toBe("approval.resolve");
+      expect(result.wait).toMatchObject({
+        ready: false,
+        reason: "timeout",
+        ignoredApprovalIds: ["approval-1"],
+        nextAction: "resolve_approval",
+      });
+
+      await createJob({ key: "approval-wait-cli", repo: ".", prompt: "hello" });
+      const cliJobPath = ".codexctl/jobs/approval-wait-cli/job.json";
+      const cliJob = await Bun.file(cliJobPath).json();
+      cliJob.status = "running";
+      cliJob.approvals.push({
+        id: "approval-1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: { command: "true" },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(cliJobPath, JSON.stringify(cliJob));
+      const cli = await runCli(["approval", "approve", "approval-wait-cli", "approval-1", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout)).toMatchObject({
+        command: {
+          type: "approval.resolve",
+          approvalId: "approval-1",
+        },
+        wait: {
+          ready: false,
+          reason: "timeout",
+          ignoredApprovalIds: ["approval-1"],
+        },
+      });
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("approval wait validates wait flags before enqueueing", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "approval-wait-invalid", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/approval-wait-invalid/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.approvals.push({
+        id: "approval-1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: { command: "true" },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const cli = await runCli(["approval", "approve", "approval-wait-invalid", "approval-1", "--wait", "--timeout-ms", "", "--json"], tmp);
+      expect(cli.exitCode).toBe(2);
+      expect(JSON.parse(cli.stderr).error).toEqual({
+        code: "invalid_flag",
+        message: "--timeout-ms must be a positive integer",
+      });
+      expect(await Bun.file(".codexctl/jobs/approval-wait-invalid/control.jsonl").text()).toBe("");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

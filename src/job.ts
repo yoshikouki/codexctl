@@ -242,6 +242,7 @@ export type JobSummary = {
 
 export type JobWaitOptions = {
   eventLimit?: number;
+  ignoredApprovalIds?: string[];
   intervalMs?: number;
   timeoutMs?: number | null;
 };
@@ -252,11 +253,17 @@ export type JobWaitResult = {
   reason: "terminal" | "approval_required" | "timeout";
   elapsedMs: number;
   intervalMs: number;
+  ignoredApprovalIds: string[];
   timeoutMs: number | null;
   deadlineAt: string | null;
   status: JobStatus;
   nextAction: JobNextAction;
   summary: JobSummary;
+};
+
+export type ApprovalDecisionAndWaitResult = {
+  command: ApprovalResolveCommand;
+  wait: JobWaitResult;
 };
 
 export type WorkerHealth = {
@@ -862,6 +869,7 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
 
 export async function waitForJob(key: string, options: JobWaitOptions = {}): Promise<JobWaitResult> {
   const eventLimit = options.eventLimit ?? 10;
+  const ignoredApprovalIds = options.ignoredApprovalIds ?? [];
   const intervalMs = options.intervalMs ?? 1000;
   const timeoutMs = options.timeoutMs ?? null;
   const startedAt = Date.now();
@@ -869,17 +877,33 @@ export async function waitForJob(key: string, options: JobWaitOptions = {}): Pro
 
   while (true) {
     const summary = await readJobSummary(key, eventLimit);
-    const readyReason = readyReasonFor(summary);
+    const readyReason = readyReasonFor(summary, ignoredApprovalIds);
     const now = Date.now();
     if (readyReason) {
-      return jobWaitResult(key, summary, true, readyReason, startedAt, now, intervalMs, timeoutMs, deadline);
+      return jobWaitResult(key, summary, true, readyReason, startedAt, now, intervalMs, ignoredApprovalIds, timeoutMs, deadline);
     }
     if (deadline !== null && now >= deadline) {
-      return jobWaitResult(key, summary, false, "timeout", startedAt, now, intervalMs, timeoutMs, deadline);
+      return jobWaitResult(key, summary, false, "timeout", startedAt, now, intervalMs, ignoredApprovalIds, timeoutMs, deadline);
     }
     const sleepMs = deadline === null ? intervalMs : Math.max(0, Math.min(intervalMs, deadline - now));
     await Bun.sleep(sleepMs);
   }
+}
+
+export async function enqueueApprovalDecisionAndWait(
+  key: string,
+  approvalId: string,
+  decision: ApprovalResolveCommand["decision"],
+  options: JobWaitOptions = {},
+): Promise<ApprovalDecisionAndWaitResult> {
+  const command = await enqueueApprovalDecision(key, approvalId, decision);
+  return {
+    command,
+    wait: await waitForJob(key, {
+      ...options,
+      ignoredApprovalIds: [...(options.ignoredApprovalIds ?? []), approvalId],
+    }),
+  };
 }
 
 export async function enqueueSteer(key: string, prompt: string): Promise<ControlCommand> {
@@ -1575,8 +1599,13 @@ function nextAction(
   return "read_result";
 }
 
-function readyReasonFor(summary: JobSummary): JobWaitResult["reason"] | null {
-  if (summary.nextAction === "resolve_approval") return "approval_required";
+function readyReasonFor(summary: JobSummary, ignoredApprovalIds: string[]): JobWaitResult["reason"] | null {
+  if (
+    summary.nextAction === "resolve_approval"
+    && summary.actionableApprovals.some((approval) => !ignoredApprovalIds.includes(approval.id))
+  ) {
+    return "approval_required";
+  }
   if (summary.status === "completed" || summary.status === "failed" || summary.status === "cancelled") return "terminal";
   return null;
 }
@@ -1589,6 +1618,7 @@ function jobWaitResult(
   startedAt: number,
   endedAt: number,
   intervalMs: number,
+  ignoredApprovalIds: string[],
   timeoutMs: number | null,
   deadline: number | null,
 ): JobWaitResult {
@@ -1598,6 +1628,7 @@ function jobWaitResult(
     reason,
     elapsedMs: Math.max(0, endedAt - startedAt),
     intervalMs,
+    ignoredApprovalIds,
     timeoutMs,
     deadlineAt: deadline === null ? null : new Date(deadline).toISOString(),
     status: summary.status,

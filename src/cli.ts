@@ -3,6 +3,7 @@ import { readDaemonVersion } from "./app-server.ts";
 import { compactJobEvent } from "./events.ts";
 import {
   cancelJob,
+  enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
   listJobs,
@@ -75,6 +76,7 @@ const knownPublicFlags = [
   "status",
   "ticks",
   "timeout-ms",
+  "wait",
 ];
 
 export async function main(argv: string[]): Promise<void> {
@@ -266,14 +268,26 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "approval" && action === "approve" && key && extra) {
-    allowFlags(args, ["json", "for-session"]);
-    await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "for-session") ? "approveForSession" : "approve"));
+    allowFlags(args, ["json", "for-session", "wait", "events", "interval-ms", "timeout-ms"]);
+    const decision = booleanFlag(args, "for-session") ? "approveForSession" : "approve";
+    if (booleanFlag(args, "wait")) {
+      const waitOptions = waitOptionsFromFlags(args);
+      await printJson(await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions));
+    } else {
+      await printJson(await enqueueApprovalDecision(key, extra, decision));
+    }
     return;
   }
 
   if (resource === "approval" && action === "reject" && key && extra) {
-    allowFlags(args, ["json", "cancel"]);
-    await printJson(await enqueueApprovalDecision(key, extra, booleanFlag(args, "cancel") ? "cancel" : "reject"));
+    allowFlags(args, ["json", "cancel", "wait", "events", "interval-ms", "timeout-ms"]);
+    const decision = booleanFlag(args, "cancel") ? "cancel" : "reject";
+    if (booleanFlag(args, "wait")) {
+      const waitOptions = waitOptionsFromFlags(args);
+      await printJson(await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions));
+    } else {
+      await printJson(await enqueueApprovalDecision(key, extra, decision));
+    }
     return;
   }
 
@@ -461,6 +475,14 @@ function eventLimitFlag(args: Args): number {
   return nonNegativeIntegerFlag(args, "events", 10);
 }
 
+function waitOptionsFromFlags(args: Args): { eventLimit: number; intervalMs: number; timeoutMs: number | null } {
+  return {
+    eventLimit: eventLimitFlag(args),
+    intervalMs: intervalMsFlag(args),
+    timeoutMs: numberFlag(args, "timeout-ms"),
+  };
+}
+
 function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): number {
   const value = args.flags.get(name);
   if (value === undefined) return fallback;
@@ -527,8 +549,8 @@ function usageText(): string {
   codexctl job reconcile [--dry-run] --json
   codexctl approval list <job-key> [--all] --json
   codexctl approval show <job-key> <approval-id> --json
-  codexctl approval approve <job-key> <approval-id> [--for-session] --json
-  codexctl approval reject <job-key> <approval-id> [--cancel] --json
+  codexctl approval approve <job-key> <approval-id> [--for-session] [--wait] --json
+  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait] --json
   codexctl supervisor once [--interval-ms <ms>] --json
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
