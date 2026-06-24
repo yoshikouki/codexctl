@@ -902,11 +902,17 @@ describe("supervisor", () => {
   test("planSupervisorActions returns non-executing next action recommendations", async () => {
     const cwd = process.cwd();
     const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const realDateNow = Date.now;
     try {
       process.chdir(tmp);
+      const fixedNow = Date.now();
       await createJob({ key: "approval-plan", repo: ".", prompt: "hello" });
       await createJob({ key: "cancel-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "cancel-attention-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "cancel-critical-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "stale-attention-plan", repo: ".", prompt: "hello" });
       await createJob({ key: "stale-plan", repo: ".", prompt: "hello" });
+      await createJob({ key: "missing-heartbeat-plan", repo: ".", prompt: "hello" });
       await createJob({ key: "dead-plan", repo: ".", prompt: "hello" });
       await createJob({ key: "failed-plan", repo: ".", prompt: "hello" });
       await mkdir(".codexctl/jobs/unreadable-plan", { recursive: true });
@@ -936,13 +942,52 @@ describe("supervisor", () => {
       cancel.threadId = "thread-1";
       cancel.turnId = "turn-1";
       await Bun.write(".codexctl/jobs/cancel-plan/job.json", JSON.stringify(cancel));
-      await cancelJob("cancel-plan");
+      await Bun.write(
+        ".codexctl/jobs/cancel-plan/control.jsonl",
+        JSON.stringify({ id: "fresh-cancel", type: "turn.interrupt", at: "2999-01-01T00:00:00.000Z" }) + "\n",
+      );
+
+      const cancelAttention = await Bun.file(".codexctl/jobs/cancel-attention-plan/job.json").json();
+      cancelAttention.status = "running";
+      cancelAttention.workerPid = process.pid;
+      cancelAttention.workerHeartbeatAt = new Date().toISOString();
+      cancelAttention.threadId = "thread-1";
+      cancelAttention.turnId = "turn-1";
+      await Bun.write(".codexctl/jobs/cancel-attention-plan/job.json", JSON.stringify(cancelAttention));
+      await Bun.write(
+        ".codexctl/jobs/cancel-attention-plan/control.jsonl",
+        JSON.stringify({ id: "attention-cancel", type: "turn.interrupt", at: new Date(fixedNow - 2 * 60_000).toISOString() }) + "\n",
+      );
+
+      const cancelCritical = await Bun.file(".codexctl/jobs/cancel-critical-plan/job.json").json();
+      cancelCritical.status = "running";
+      cancelCritical.workerPid = process.pid;
+      cancelCritical.workerHeartbeatAt = new Date().toISOString();
+      cancelCritical.threadId = "thread-1";
+      cancelCritical.turnId = "turn-1";
+      await Bun.write(".codexctl/jobs/cancel-critical-plan/job.json", JSON.stringify(cancelCritical));
+      await Bun.write(
+        ".codexctl/jobs/cancel-critical-plan/control.jsonl",
+        JSON.stringify({ id: "old-cancel", type: "turn.interrupt", at: "1970-01-01T00:00:00.000Z" }) + "\n",
+      );
+
+      const staleAttention = await Bun.file(".codexctl/jobs/stale-attention-plan/job.json").json();
+      staleAttention.status = "running";
+      staleAttention.workerPid = process.pid;
+      staleAttention.workerHeartbeatAt = new Date(fixedNow - 31_000).toISOString();
+      await Bun.write(".codexctl/jobs/stale-attention-plan/job.json", JSON.stringify(staleAttention));
 
       const stale = await Bun.file(".codexctl/jobs/stale-plan/job.json").json();
       stale.status = "running";
       stale.workerPid = process.pid;
       stale.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
       await Bun.write(".codexctl/jobs/stale-plan/job.json", JSON.stringify(stale));
+
+      const missingHeartbeat = await Bun.file(".codexctl/jobs/missing-heartbeat-plan/job.json").json();
+      missingHeartbeat.status = "running";
+      missingHeartbeat.workerPid = process.pid;
+      missingHeartbeat.workerHeartbeatAt = null;
+      await Bun.write(".codexctl/jobs/missing-heartbeat-plan/job.json", JSON.stringify(missingHeartbeat));
 
       const dead = await Bun.file(".codexctl/jobs/dead-plan/job.json").json();
       dead.status = "running";
@@ -956,31 +1001,54 @@ describe("supervisor", () => {
       failed.error = "boom";
       await Bun.write(".codexctl/jobs/failed-plan/job.json", JSON.stringify(failed));
 
+      Date.now = () => fixedNow;
       const plan = await planSupervisorActions();
-      expect(plan.health.total).toBe(6);
+      expect(plan.health.total).toBe(10);
       expect(plan.health.unreadable).toBe(1);
       expect(plan.health.actionableApprovals).toBe(1);
-      expect(plan.health.waitingCancel).toBe(1);
-      expect(plan.health.staleWorkers).toBe(2);
+      expect(plan.health.waitingCancel).toBe(3);
+      expect(plan.health.staleWorkers).toBe(4);
       expect(plan.health.deadWorkers).toBe(1);
       expect(plan.health.inspectError).toBe(1);
-      expect(plan.actions.map((action) => action.kind).sort()).toEqual([
-        "inspect_dead_worker",
-        "inspect_error",
-        "inspect_stale_worker",
-        "inspect_unreadable",
-        "resolve_approval",
-        "wait_cancel",
-      ]);
+      expect(plan.actions).toHaveLength(10);
+      expect(plan.actions.filter((action) => action.kind === "wait_cancel")).toHaveLength(3);
       expect(plan.actions.find((action) => action.kind === "resolve_approval")?.nextCommand).toBe("codexctl approval list approval-plan --json");
-      expect(plan.actions.find((action) => action.kind === "wait_cancel")?.severity).toBe("info");
+      const cancelAction = plan.actions.find((action) => action.jobKey === "cancel-plan");
+      expect(cancelAction?.kind).toBe("wait_cancel");
+      expect(cancelAction?.severity).toBe("info");
+      expect(cancelAction?.thresholdMs).toBe(60_000);
+      const attentionCancelAction = plan.actions.find((action) => action.jobKey === "cancel-attention-plan");
+      expect(attentionCancelAction?.kind).toBe("wait_cancel");
+      expect(attentionCancelAction?.severity).toBe("attention");
+      expect(attentionCancelAction?.ageMs).toBe(2 * 60_000);
+      expect(attentionCancelAction?.thresholdMs).toBe(60_000);
+      const oldCancelAction = plan.actions.find((action) => action.jobKey === "cancel-critical-plan");
+      expect(oldCancelAction?.kind).toBe("wait_cancel");
+      expect(oldCancelAction?.severity).toBe("critical");
+      expect(oldCancelAction?.ageMs).toBeGreaterThan(5 * 60_000);
+      expect(oldCancelAction?.thresholdMs).toBe(5 * 60_000);
+      const staleAttentionAction = plan.actions.find((action) => action.jobKey === "stale-attention-plan");
+      expect(staleAttentionAction?.kind).toBe("inspect_stale_worker");
+      expect(staleAttentionAction?.severity).toBe("attention");
+      expect(staleAttentionAction?.ageMs).toBe(31_000);
+      expect(staleAttentionAction?.thresholdMs).toBe(5 * 60_000);
+      const staleAction = plan.actions.find((action) => action.jobKey === "stale-plan");
+      expect(staleAction?.kind).toBe("inspect_stale_worker");
+      expect(staleAction?.severity).toBe("critical");
+      expect(staleAction?.thresholdMs).toBe(5 * 60_000);
+      const missingHeartbeatAction = plan.actions.find((action) => action.jobKey === "missing-heartbeat-plan");
+      expect(missingHeartbeatAction?.kind).toBe("inspect_stale_worker");
+      expect(missingHeartbeatAction?.severity).toBe("attention");
+      expect(missingHeartbeatAction?.ageMs).toBeNull();
+      expect(missingHeartbeatAction?.thresholdMs).toBe(5 * 60_000);
       expect(plan.actions.find((action) => action.kind === "inspect_dead_worker")?.nextCommand).toBe("codexctl job summary dead-plan --events 20 --json");
       expect(plan.actions.find((action) => action.kind === "inspect_unreadable")?.severity).toBe("critical");
 
       const cli = await runCli(["supervisor", "plan", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
-      expect(JSON.parse(cli.stdout).actions).toHaveLength(6);
+      expect(JSON.parse(cli.stdout).actions).toHaveLength(10);
     } finally {
+      Date.now = realDateNow;
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
     }

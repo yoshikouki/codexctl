@@ -2,6 +2,10 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from "./job.ts";
 
+const WAIT_CANCEL_ATTENTION_MS = 60_000;
+const WAIT_CANCEL_CRITICAL_MS = 5 * 60_000;
+const STALE_WORKER_CRITICAL_MS = 5 * 60_000;
+
 export type SupervisorTick = {
   at: string;
   health: SupervisorHealthSummary;
@@ -31,6 +35,8 @@ export type SupervisorAction = {
   severity: "info" | "attention" | "critical";
   reason: string;
   nextCommand: string;
+  ageMs?: number | null;
+  thresholdMs?: number | null;
 };
 
 export type SupervisorState = {
@@ -194,12 +200,16 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
     }
 
     if (job.nextAction === "wait_cancel") {
+      const cancelAgeMs = ageSince(job.cancelRequestedAt);
+      const severity = severityForAge(cancelAgeMs, WAIT_CANCEL_ATTENTION_MS, WAIT_CANCEL_CRITICAL_MS);
       actions.push({
         jobKey: job.key,
         kind: "wait_cancel",
-        severity: "info",
-        reason: `turn interrupt is queued${job.cancelRequestedAt ? ` since ${job.cancelRequestedAt}` : ""}`,
+        severity,
+        reason: `turn interrupt is queued${ageText(cancelAgeMs)}${job.cancelRequestedAt ? ` since ${job.cancelRequestedAt}` : ""}`,
         nextCommand: `codexctl job summary ${job.key} --events 0 --json`,
+        ageMs: cancelAgeMs,
+        thresholdMs: thresholdForSeverity(severity, WAIT_CANCEL_ATTENTION_MS, WAIT_CANCEL_CRITICAL_MS),
       });
     }
 
@@ -214,12 +224,16 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
     }
 
     if (job.status === "running" && job.workerHealth?.reason === "alive_stale") {
+      const heartbeatAgeMs = job.workerHealth.heartbeatAgeMs;
+      const severity = heartbeatAgeMs !== null && heartbeatAgeMs >= STALE_WORKER_CRITICAL_MS ? "critical" : "attention";
       actions.push({
         jobKey: job.key,
         kind: "inspect_stale_worker",
-        severity: "attention",
-        reason: `worker heartbeat is stale${job.workerHealth.heartbeatAgeMs === null ? "" : ` by ${job.workerHealth.heartbeatAgeMs}ms`}`,
+        severity,
+        reason: `worker heartbeat is stale${ageText(heartbeatAgeMs)}`,
         nextCommand: `codexctl job summary ${job.key} --events 20 --json`,
+        ageMs: heartbeatAgeMs,
+        thresholdMs: STALE_WORKER_CRITICAL_MS,
       });
     }
 
@@ -228,12 +242,43 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
         jobKey: job.key,
         kind: "inspect_dead_worker",
         severity: "critical",
-        reason: `worker is not alive (${job.workerHealth.reason})`,
+        reason: `worker is not alive (${job.workerHealth.reason})${ageText(job.workerHealth.heartbeatAgeMs)}`,
         nextCommand: `codexctl job summary ${job.key} --events 20 --json`,
+        ageMs: job.workerHealth.heartbeatAgeMs,
       });
     }
   }
   return actions;
+}
+
+function ageSince(timestamp: string | null): number | null {
+  if (timestamp === null) return null;
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Date.now() - parsed);
+}
+
+function severityForAge(
+  ageMs: number | null,
+  attentionMs: number,
+  criticalMs: number,
+): SupervisorAction["severity"] {
+  if (ageMs === null) return "info";
+  if (ageMs >= criticalMs) return "critical";
+  if (ageMs >= attentionMs) return "attention";
+  return "info";
+}
+
+function thresholdForSeverity(
+  severity: SupervisorAction["severity"],
+  attentionMs: number,
+  criticalMs: number,
+): number {
+  return severity === "critical" ? criticalMs : attentionMs;
+}
+
+function ageText(ageMs: number | null): string {
+  return ageMs === null ? "" : ` for ${ageMs}ms`;
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

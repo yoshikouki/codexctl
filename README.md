@@ -36,6 +36,8 @@ The current PoC supports both synchronous `job start` and detached `job start --
 
 Running workers refresh `worker-heartbeat.json`, which is overlaid onto job reads as `workerHeartbeatAt`. `job list` exposes the last heartbeat and whether the worker PID is alive; `job status` and `job summary.workerHealth` also expose whether the heartbeat is stale and the reason. Heartbeat staleness is an observation signal for agents and supervisors; it is not yet an automatic kill or replay policy.
 
+`supervisor plan` is time-aware for stuck-looking states. Waiting cancellation actions include `ageMs` and move from `info` to `attention` after 60 seconds and to `critical` after 5 minutes. Stale worker actions include heartbeat `ageMs` and become `critical` after 5 minutes. These are still recommendations only; `nextCommand` is not auto-executed.
+
 `job rm` and `job prune` only clean local `.codexctl/jobs` records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
 
 When a `--json` command fails, `codexctl` writes a structured error to stderr:

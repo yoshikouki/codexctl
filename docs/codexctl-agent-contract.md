@@ -85,7 +85,7 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 
 `job list` summarizes local job records as an agent overview: status, `nextAction`, worker health, pending/actionable approval counts, and cancel metadata. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
-`supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command.
+`supervisor plan` returns recommended next actions without executing them. Actions include approval resolution, cancellation waiting, error inspection, stale/dead worker inspection, and unreadable job inspection. `nextCommand` is a suggested follow-up command for the caller, not an automatically executed command. Time-sensitive actions may include `ageMs` and `thresholdMs`: pending cancellation is `info` below 60 seconds, `attention` from 60 seconds, and `critical` from 5 minutes; stale worker heartbeat inspection becomes `critical` from 5 minutes.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary and the same non-executing action plan so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 
