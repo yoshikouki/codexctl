@@ -5,6 +5,7 @@ import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from ".
 const WAIT_CANCEL_ATTENTION_MS = 60_000;
 const WAIT_CANCEL_CRITICAL_MS = 5 * 60_000;
 const STALE_WORKER_CRITICAL_MS = 5 * 60_000;
+const POLICY_PERSISTENCE_TICKS = 3;
 
 export type SupervisorTick = {
   at: string;
@@ -39,6 +40,15 @@ export type SupervisorAction = {
   thresholdMs?: number | null;
   firstSeenAt?: string;
   seenTicks?: number;
+  criticalSeenTicks?: number;
+  policy?: SupervisorPolicyRecommendation;
+};
+
+export type SupervisorPolicyRecommendation = {
+  recommendation: "inspect" | "escalate";
+  reason: string;
+  basedOn: Array<"severity" | "persistence">;
+  thresholdTicks?: number;
 };
 
 export type SupervisorState = {
@@ -131,7 +141,7 @@ export async function planSupervisorActions(): Promise<{ at: string; health: Sup
   return {
     at,
     health: summarizeJobHealth(jobs),
-    actions: planJobActions(jobs),
+    actions: annotatePolicyRecommendations(planJobActions(jobs)),
   };
 }
 
@@ -142,7 +152,7 @@ async function supervisorTick(previousTick: SupervisorTick | null): Promise<Supe
   return {
     at,
     health: summarizeJobHealth(jobs),
-    actions: annotateActionPersistence(planJobActions(jobs), previousTick),
+    actions: annotatePolicyRecommendations(annotateActionPersistence(planJobActions(jobs), previousTick)),
     recovered,
   };
 }
@@ -305,6 +315,7 @@ function annotateActionPersistence(
       ...action,
       firstSeenAt: previous.firstSeenAt ?? previousTick.at,
       seenTicks: previous ? (previous.seenTicks ?? 1) + 1 : 1,
+      ...criticalPersistence(action, previous),
     };
   });
 }
@@ -316,6 +327,44 @@ function persistenceKey(action: SupervisorAction): string | null {
     return `${action.jobKey}\u0000${action.kind}\u0000${action.reason}`;
   }
   return `${action.jobKey}\u0000${action.kind}`;
+}
+
+function annotatePolicyRecommendations(actions: SupervisorAction[]): SupervisorAction[] {
+  return actions.map((action) => {
+    const policy = policyRecommendation(action);
+    return policy ? { ...action, policy } : action;
+  });
+}
+
+function policyRecommendation(action: SupervisorAction): SupervisorPolicyRecommendation | null {
+  const criticalSeenTicks = action.criticalSeenTicks ?? 0;
+  const isCriticalPersistent = criticalSeenTicks >= POLICY_PERSISTENCE_TICKS;
+  const isCritical = action.severity === "critical";
+  if (isCritical && isCriticalPersistent) {
+    return {
+      recommendation: "escalate",
+      reason: `critical recommendation persisted for ${criticalSeenTicks} critical ticks`,
+      basedOn: ["severity", "persistence"],
+      thresholdTicks: POLICY_PERSISTENCE_TICKS,
+    };
+  }
+  if (isCritical) {
+    return {
+      recommendation: "inspect",
+      reason: "critical recommendation",
+      basedOn: ["severity"],
+    };
+  }
+  return null;
+}
+
+function criticalPersistence(
+  action: SupervisorAction,
+  previous: SupervisorAction,
+): Pick<SupervisorAction, "criticalSeenTicks"> {
+  if (action.severity !== "critical") return {};
+  if (previous.severity !== "critical") return { criticalSeenTicks: 1 };
+  return { criticalSeenTicks: (previous.criticalSeenTicks ?? 1) + 1 };
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

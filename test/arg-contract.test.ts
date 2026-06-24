@@ -1029,6 +1029,11 @@ describe("supervisor", () => {
       expect(oldCancelAction?.severity).toBe("critical");
       expect(oldCancelAction?.ageMs).toBeGreaterThan(5 * 60_000);
       expect(oldCancelAction?.thresholdMs).toBe(5 * 60_000);
+      expect(oldCancelAction?.policy).toEqual({
+        recommendation: "inspect",
+        reason: "critical recommendation",
+        basedOn: ["severity"],
+      });
       const staleAttentionAction = plan.actions.find((action) => action.jobKey === "stale-attention-plan");
       expect(staleAttentionAction?.kind).toBe("inspect_stale_worker");
       expect(staleAttentionAction?.severity).toBe("attention");
@@ -1038,6 +1043,7 @@ describe("supervisor", () => {
       expect(staleAction?.kind).toBe("inspect_stale_worker");
       expect(staleAction?.severity).toBe("critical");
       expect(staleAction?.thresholdMs).toBe(5 * 60_000);
+      expect(staleAction?.policy?.recommendation).toBe("inspect");
       const missingHeartbeatAction = plan.actions.find((action) => action.jobKey === "missing-heartbeat-plan");
       expect(missingHeartbeatAction?.kind).toBe("inspect_stale_worker");
       expect(missingHeartbeatAction?.severity).toBe("attention");
@@ -1080,6 +1086,7 @@ describe("supervisor", () => {
       expect(state.lastTick?.health.inspectError).toBe(1);
       expect(state.lastTick?.health.deadWorkers).toBe(0);
       expect(state.lastTick?.actions.map((action) => action.kind)).toEqual(["inspect_error"]);
+      expect(state.lastTick?.actions[0]?.policy?.recommendation).toBe("inspect");
       expect((await readSupervisorState()).tickCount).toBe(1);
       expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
       expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");
@@ -1115,6 +1122,7 @@ describe("supervisor", () => {
       expect(lastAction?.kind).toBe("wait_cancel");
       expect(lastAction?.seenTicks).toBe(2);
       expect(typeof lastAction?.firstSeenAt).toBe("string");
+      expect(lastAction?.policy).toBeUndefined();
 
       const tickEvents = (await readSupervisorEvents())
         .filter((event): event is { type: "supervisor.tick"; tick: { at: string; actions: Array<{ firstSeenAt?: string; seenTicks?: number }> } } =>
@@ -1152,26 +1160,45 @@ describe("supervisor", () => {
         JSON.stringify({ id: "escalating-cancel-command", type: "turn.interrupt", at: new Date(fixedNow - 299_000).toISOString() }) + "\n",
       );
 
-      const nowValues = [fixedNow, fixedNow + 2_000];
+      const nowValues = [fixedNow, fixedNow + 2_000, fixedNow + 3_000, fixedNow + 4_000];
       let nowIndex = 0;
       Date.now = () => nowValues[Math.min(nowIndex++, nowValues.length - 1)] ?? fixedNow;
 
-      const state = await runSupervisor({ intervalMs: 1, maxTicks: 2 });
+      const state = await runSupervisor({ intervalMs: 1, maxTicks: 4 });
       const action = state.lastTick?.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
       expect(action?.severity).toBe("critical");
-      expect(action?.seenTicks).toBe(2);
+      expect(action?.seenTicks).toBe(4);
+      expect(action?.criticalSeenTicks).toBe(3);
       expect(typeof action?.firstSeenAt).toBe("string");
+      expect(action?.policy).toEqual({
+        recommendation: "escalate",
+        reason: "critical recommendation persisted for 3 critical ticks",
+        basedOn: ["severity", "persistence"],
+        thresholdTicks: 3,
+      });
 
       const tickEvents = (await readSupervisorEvents())
-        .filter((event): event is { type: "supervisor.tick"; tick: { actions: Array<{ jobKey?: string; kind?: string; severity?: string; seenTicks?: number }> } } =>
+        .filter((event): event is { type: "supervisor.tick"; tick: { actions: Array<{ jobKey?: string; kind?: string; severity?: string; seenTicks?: number; criticalSeenTicks?: number; policy?: { recommendation?: string } }> } } =>
           (event as { type?: string }).type === "supervisor.tick"
         );
       const firstWait = tickEvents[0]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
       const secondWait = tickEvents[1]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
+      const thirdWait = tickEvents[2]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
+      const fourthWait = tickEvents[3]?.tick.actions.find((candidate) => candidate.jobKey === "escalating-cancel" && candidate.kind === "wait_cancel");
       expect(firstWait?.severity).toBe("attention");
       expect(firstWait?.seenTicks).toBeUndefined();
       expect(secondWait?.severity).toBe("critical");
       expect(secondWait?.seenTicks).toBe(2);
+      expect(secondWait?.criticalSeenTicks).toBe(1);
+      expect(secondWait?.policy?.recommendation).toBe("inspect");
+      expect(thirdWait?.severity).toBe("critical");
+      expect(thirdWait?.seenTicks).toBe(3);
+      expect(thirdWait?.criticalSeenTicks).toBe(2);
+      expect(thirdWait?.policy?.recommendation).toBe("inspect");
+      expect(fourthWait?.severity).toBe("critical");
+      expect(fourthWait?.seenTicks).toBe(4);
+      expect(fourthWait?.criticalSeenTicks).toBe(3);
+      expect(fourthWait?.policy?.recommendation).toBe("escalate");
     } finally {
       Date.now = realDateNow;
       process.chdir(cwd);
