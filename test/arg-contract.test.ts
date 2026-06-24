@@ -2008,6 +2008,79 @@ describe("supervisor", () => {
     }
   });
 
+  test("supervisor next starts, waits, selects, and inspects the next action", async () => {
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      await mkdir(join(tmp, ".codexctl/jobs/supervisor-next-failed"), { recursive: true });
+      const now = new Date().toISOString();
+      await Bun.write(join(tmp, ".codexctl/jobs/supervisor-next-failed/job.json"), JSON.stringify({
+        key: "supervisor-next-failed",
+        jobIncarnation: null,
+        repo: ".",
+        prompt: "hello",
+        model: null,
+        approvalPolicy: "on-request",
+        sandbox: null,
+        status: "failed",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now,
+        completedAt: now,
+        workerId: null,
+        workerGeneration: 0,
+        workerPid: null,
+        workerHeartbeatAt: null,
+        threadId: null,
+        turnId: null,
+        cancelRequestedAt: null,
+        cancelCommandId: null,
+        approvals: [],
+        finalResponse: "",
+        error: "boom",
+      }));
+
+      const cli = await runCli([
+        "supervisor",
+        "next",
+        "--after-tick",
+        "0",
+        "--interval-ms",
+        "1",
+        "--timeout-ms",
+        "1000",
+        "--max-ticks",
+        "1",
+        "--json",
+      ], tmp);
+      expect(cli.exitCode).toBe(0);
+      const result = JSON.parse(cli.stdout);
+      expect(result.start.action).toBe("started");
+      expect(result.wait.ready).toBe(true);
+      expect(result.wait.reason).toBe("actions");
+      expect(result.wait.afterTick).toBe(0);
+      expect(result.action).toMatchObject({
+        jobKey: "supervisor-next-failed",
+        kind: "inspect_error",
+        severity: "critical",
+      });
+      expect(result.inspection).toMatchObject({
+        readOnly: true,
+        action: {
+          id: result.action?.id,
+        },
+        inspection: {
+          type: "job_summary",
+          summary: {
+            key: "supervisor-next-failed",
+            status: "failed",
+          },
+        },
+      });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("supervisor start runs detached and stop handles stale state", async () => {
     const cwd = process.cwd();
     const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));

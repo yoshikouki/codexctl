@@ -170,6 +170,19 @@ export type SupervisorWaitResult = {
   actions: SupervisorAction[];
 };
 
+export type SupervisorNextOptions = SupervisorWaitOptions & {
+  startIntervalMs?: number;
+  startMaxTicks?: number;
+};
+
+export type SupervisorNextResult = {
+  at: string;
+  start: SupervisorStartResult;
+  wait: SupervisorWaitResult;
+  action: SupervisorAction | null;
+  inspection: SupervisorActionInspection | null;
+};
+
 export type SupervisorActionInspection = {
   at: string;
   planAt: string;
@@ -457,6 +470,35 @@ export async function waitForSupervisor(options: SupervisorWaitOptions = {}): Pr
   }
 }
 
+export async function nextSupervisorAction(options: SupervisorNextOptions = {}): Promise<SupervisorNextResult> {
+  const previousState = await readSupervisorStateIfExists(supervisorDir(process.cwd()));
+  const start = await startSupervisor({
+    intervalMs: options.startIntervalMs ?? options.intervalMs ?? 1000,
+    maxTicks: options.startMaxTicks,
+  });
+  const afterTick = options.afterTick ?? previousState?.tickCount ?? 0;
+  const wait = await waitForSupervisor({
+    afterTick,
+    intervalMs: options.intervalMs,
+    timeoutMs: options.timeoutMs,
+  });
+  const action = selectNextSupervisorAction(wait.actions);
+  const at = new Date().toISOString();
+  return {
+    at,
+    start,
+    wait,
+    action,
+    inspection: action === null ? null : {
+      at,
+      planAt: wait.state?.lastTick?.at ?? at,
+      readOnly: true,
+      action,
+      inspection: await inspectActionPayload(action),
+    },
+  };
+}
+
 async function readRecentSupervisorActionTicks(
   dir: string,
   tickLimit: number,
@@ -563,6 +605,19 @@ function supervisorWaitResult(
     state,
     actions,
   };
+}
+
+function selectNextSupervisorAction(actions: SupervisorAction[]): SupervisorAction | null {
+  return actions.reduce<SupervisorAction | null>((selected, action) => {
+    if (selected === null) return action;
+    return severityRank(action.severity) > severityRank(selected.severity) ? action : selected;
+  }, null);
+}
+
+function severityRank(severity: SupervisorAction["severity"]): number {
+  if (severity === "critical") return 3;
+  if (severity === "attention") return 2;
+  return 1;
 }
 
 export async function planSupervisorActions(): Promise<{ at: string; health: SupervisorHealthSummary; actions: SupervisorAction[] }> {

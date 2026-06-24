@@ -7,7 +7,7 @@
   },
   "scripts": {
     "codexctl": "bun run src/cli.ts",
-    "test": "bun test",
+    "test": "bun test --max-concurrency 1",
     "typecheck": "bun x tsc --noEmit"
   },
   "devDependencies": {
@@ -15,4 +15,3 @@
     "typescript": "latest"
   }
 }
-
