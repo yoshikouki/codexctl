@@ -15,6 +15,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl job watch demo --format raw --json` follows the raw persisted app-server event log.
 - `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
 - `codexctl job cancel demo --json` interrupts an active turn or cancels a queued job.
+- `codexctl job rm demo --json` removes a terminal local job record.
+- `codexctl job prune --keep 10 --dry-run --json` previews completed job record cleanup.
 - `codexctl job recover demo --json` reconciles a queued or stale running job.
 - `codexctl job sweep --json` reconciles all queued or running local jobs.
 - `codexctl approval list demo --json` lists pending approval requests.
@@ -30,6 +32,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
 
 `job cancel` marks queued jobs as `cancelled` immediately. For running jobs, it appends a `turn.interrupt` control command once; repeated cancel requests return `already_requested`. While the interrupt is pending, `job summary` returns `nextAction: "wait_cancel"` with `cancelRequestedAt` and `cancelCommandId`. The active worker sends app-server `turn/interrupt` on the same stdio connection and the job becomes `cancelled` when app-server completes the turn as interrupted. If the worker is already gone for an in-flight app-server turn, cancel marks the job failed instead of queuing an unreachable interrupt.
+
+`job rm` and `job prune` only clean local `.codexctl/jobs` records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
 
 When a `--json` command fails, `codexctl` writes a structured error to stderr:
 

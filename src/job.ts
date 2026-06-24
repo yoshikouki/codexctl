@@ -1,9 +1,19 @@
-import { appendFile, mkdir, readdir } from "node:fs/promises";
+import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
 import { compactJobEvent, type CompactJobEvent } from "./events.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export class JobOperationError extends Error {
+  constructor(
+    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable",
+    message: string,
+    readonly exitCode = 2,
+  ) {
+    super(message);
+  }
+}
 
 export type JobRecord = {
   key: string;
@@ -87,6 +97,35 @@ export type JobCancelResult = {
   job: JobRecord;
   command: TurnInterruptCommand | null;
 };
+
+export type JobRemoveOptions = {
+  dryRun?: boolean;
+  force?: boolean;
+};
+
+export type JobRemoveResult = {
+  action: "removed" | "would_remove";
+  key: string;
+  status: JobStatus | "unreadable";
+  reason: string;
+};
+
+export type JobPruneOptions = {
+  dryRun?: boolean;
+  keep?: number;
+  status?: JobPruneStatus;
+};
+
+export type JobPruneResult = {
+  scanned: number;
+  matched: number;
+  keep: number;
+  status: JobPruneStatus;
+  dryRun: boolean;
+  removed: JobRemoveResult[];
+};
+
+export type JobPruneStatus = "completed" | "failed" | "cancelled" | "terminal";
 
 export type JobListItem = {
   key: string;
@@ -215,6 +254,66 @@ export async function sweepJobs(): Promise<JobRecoveryResult[]> {
     results.push(await recoverJob(job.key));
   }
   return results;
+}
+
+export async function removeJob(key: string, options: JobRemoveOptions = {}): Promise<JobRemoveResult> {
+  const dir = jobDir(process.cwd(), key);
+  let status: JobStatus | "unreadable";
+  let job: JobRecord | null = null;
+  try {
+    job = await readJob(key);
+  } catch (error) {
+    if (!options.force) {
+      throw new JobOperationError("job_unreadable", `Job '${key}' could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (job) {
+    status = job.status;
+    if (job.workerPid !== null && isProcessAlive(job.workerPid)) {
+      throw new JobOperationError("job_worker_alive", `Job '${key}' still has live worker ${job.workerPid}; cancel or wait before removing it`);
+    }
+    if (!isTerminalStatus(job.status)) {
+      if (!options.force) {
+        throw new JobOperationError("job_not_terminal", `Job '${key}' is ${job.status}; only terminal jobs can be removed without --force`);
+      }
+    }
+  } else {
+    status = "unreadable";
+  }
+
+  const action = options.dryRun ? "would_remove" : "removed";
+  if (!options.dryRun) {
+    await rm(dir, { recursive: true, force: true });
+  }
+  return {
+    action,
+    key,
+    status,
+    reason: options.dryRun ? "dry run" : "job record removed",
+  };
+}
+
+export async function pruneJobs(options: JobPruneOptions = {}): Promise<JobPruneResult> {
+  const keep = options.keep ?? 10;
+  const status = options.status ?? "completed";
+  const jobs = await listJobs();
+  const matchedJobs = jobs
+    .filter((job) => matchesPruneStatus(job.status, status))
+    .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+  const candidates = matchedJobs.slice(keep);
+  const removed: JobRemoveResult[] = [];
+  for (const job of candidates) {
+    removed.push(await removeJob(job.key, { dryRun: options.dryRun }));
+  }
+  return {
+    scanned: jobs.length,
+    matched: matchedJobs.length,
+    keep,
+    status,
+    dryRun: options.dryRun ?? false,
+    removed,
+  };
 }
 
 export async function cancelJob(key: string): Promise<JobCancelResult> {
@@ -876,6 +975,15 @@ function summarizeJob(job: JobRecord): JobListItem {
     pendingApprovals: job.approvals.filter((approval) => approval.status === "pending").length,
     error: job.error,
   };
+}
+
+function isTerminalStatus(status: JobStatus | "unreadable"): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function matchesPruneStatus(status: JobStatus | "unreadable", filter: JobPruneStatus): boolean {
+  if (filter === "terminal") return isTerminalStatus(status);
+  return status === filter;
 }
 
 function approvalCounts(approvals: ApprovalRecord[]): Record<ApprovalStatus, number> {

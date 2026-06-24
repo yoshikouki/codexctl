@@ -12,6 +12,8 @@ import {
   readJobEvents,
   readJobSummary,
   readNewEventLines,
+  removeJob,
+  pruneJobs,
   recoverJob,
   runJobWorker,
   startJob,
@@ -43,15 +45,18 @@ const knownPublicFlags = [
   "for-session",
   "format",
   "force",
+  "dry-run",
   "help",
   "interval-ms",
   "json",
+  "keep",
   "key",
   "max-ticks",
   "model",
   "prompt",
   "repo",
   "sandbox",
+  "status",
 ];
 
 export async function main(argv: string[]): Promise<void> {
@@ -156,6 +161,24 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "cancel" && key) {
     allowFlags(args, ["json"]);
     await printJson(await cancelJob(key));
+    return;
+  }
+
+  if (resource === "job" && action === "rm" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json", "force", "dry-run"]);
+    await printJson(await removeJob(key, { force: booleanFlag(args, "force"), dryRun: booleanFlag(args, "dry-run") }));
+    return;
+  }
+
+  if (resource === "job" && action === "prune") {
+    requirePositionalCount(args, 2);
+    allowFlags(args, ["json", "keep", "dry-run", "status"]);
+    await printJson(await pruneJobs({
+      keep: nonNegativeIntegerFlag(args, "keep", 10),
+      dryRun: booleanFlag(args, "dry-run"),
+      status: pruneStatusFlag(args),
+    }));
     return;
   }
 
@@ -290,6 +313,12 @@ function requiredString(args: Args, name: string): string {
   return value;
 }
 
+function requirePositionalCount(args: Args, count: number): void {
+  if (args.positionals.length !== count) {
+    throw new CliError("usage_error", usageText());
+  }
+}
+
 function approvalPolicyFlag(args: Args): "untrusted" | "on-failure" | "on-request" | "never" | undefined {
   const value = stringFlag(args, "approval-policy");
   if (value === null) return undefined;
@@ -311,16 +340,27 @@ function eventFormatFlag(args: Args): "raw" | "compact" {
   throw new CliError("invalid_flag", "--format must be one of: raw, compact");
 }
 
+function pruneStatusFlag(args: Args): "completed" | "failed" | "cancelled" | "terminal" | undefined {
+  const value = stringFlag(args, "status");
+  if (value === null) return undefined;
+  if (value === "completed" || value === "failed" || value === "cancelled" || value === "terminal") return value;
+  throw new CliError("invalid_flag", "--status must be one of: completed, failed, cancelled, terminal");
+}
+
 function intervalMsFlag(args: Args): number {
   return numberFlag(args, "interval-ms") ?? 1000;
 }
 
 function eventLimitFlag(args: Args): number {
-  const value = stringFlag(args, "events");
-  if (value === null) return 10;
+  return nonNegativeIntegerFlag(args, "events", 10);
+}
+
+function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): number {
+  const value = stringFlag(args, name);
+  if (value === null) return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new CliError("invalid_flag", "--events must be a non-negative integer");
+    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
   }
   return parsed;
 }
@@ -360,6 +400,8 @@ function usageText(): string {
   codexctl job watch <key> [--format raw|compact] --json
   codexctl job steer <key> --prompt <prompt> --json
   codexctl job cancel <key> --json
+  codexctl job rm <key> [--force] [--dry-run] --json
+  codexctl job prune [--keep <n>] [--status completed|failed|cancelled|terminal] [--dry-run] --json
   codexctl job recover <key> --json
   codexctl job sweep --json
   codexctl approval list <job-key> [--all] --json
@@ -397,13 +439,13 @@ async function watchJob(key: string, format: "raw" | "compact"): Promise<void> {
 
 if (import.meta.main) {
   main(Bun.argv.slice(2)).catch(async (error) => {
-    const exitCode = error instanceof CliError ? error.exitCode : 1;
+    const exitCode = errorExitCode(error);
     const message = error instanceof Error ? error.message : String(error);
     if (argvWantsJson(Bun.argv.slice(2))) {
       await Bun.write(Bun.stderr, JSON.stringify({
         ok: false,
         error: {
-          code: error instanceof CliError ? error.code : "internal_error",
+          code: errorCode(error),
           message,
         },
       }, null, 2) + "\n");
@@ -412,6 +454,25 @@ if (import.meta.main) {
     }
     process.exit(exitCode);
   });
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof CliError) return error.code;
+  if (isCodedError(error)) return error.code;
+  return "internal_error";
+}
+
+function errorExitCode(error: unknown): number {
+  if (error instanceof CliError) return error.exitCode;
+  if (isCodedError(error)) return error.exitCode ?? 2;
+  return 1;
+}
+
+function isCodedError(error: unknown): error is { code: string; exitCode?: number } {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && typeof (error as { code?: unknown }).code === "string";
 }
 
 function argvWantsJson(argv: string[]): boolean {

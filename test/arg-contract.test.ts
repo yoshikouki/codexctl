@@ -15,6 +15,8 @@ import {
   readJobEvents,
   readJobSummary,
   readNewEventLines,
+  removeJob,
+  pruneJobs,
   recoverJob,
   sweepJobs,
 } from "../src/job.ts";
@@ -566,6 +568,107 @@ describe("event store", () => {
       expect(result.job.error).toContain("cannot be interrupted");
       expect(await Bun.file(".codexctl/jobs/cancel-stale-test/control.jsonl").text()).toBe("");
       expect(await Bun.file(".codexctl/jobs/cancel-stale-test/events.jsonl").text()).toContain("cancel.failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("removeJob removes terminal jobs and refuses active live workers", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "remove-terminal", repo: ".", prompt: "hello" });
+      const terminalPath = ".codexctl/jobs/remove-terminal/job.json";
+      const terminal = await Bun.file(terminalPath).json();
+      terminal.status = "completed";
+      terminal.completedAt = new Date().toISOString();
+      await Bun.write(terminalPath, JSON.stringify(terminal));
+
+      const dryRun = await removeJob("remove-terminal", { dryRun: true });
+      expect(dryRun.action).toBe("would_remove");
+      expect(await Bun.file(terminalPath).exists()).toBe(true);
+
+      const cli = await runCli(["job", "rm", "remove-terminal", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).action).toBe("removed");
+      expect(await Bun.file(terminalPath).exists()).toBe(false);
+
+      await createJob({ key: "remove-running", repo: ".", prompt: "hello" });
+      const runningPath = ".codexctl/jobs/remove-running/job.json";
+      const running = await Bun.file(runningPath).json();
+      running.status = "running";
+      running.workerPid = process.pid;
+      await Bun.write(runningPath, JSON.stringify(running));
+      await expect(removeJob("remove-running", { force: true })).rejects.toThrow("still has live worker");
+      expect(await Bun.file(runningPath).exists()).toBe(true);
+
+      const rejected = await runCli(["job", "rm", "remove-running", "--force", "--json"], tmp);
+      expect(rejected.exitCode).toBe(2);
+      expect(JSON.parse(rejected.stderr).error.code).toBe("job_worker_alive");
+
+      const extra = await runCli(["job", "rm", "remove-running", "extra", "--json"], tmp);
+      expect(extra.exitCode).toBe(2);
+      expect(JSON.parse(extra.stderr).error.code).toBe("usage_error");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("pruneJobs removes old completed jobs after keeping the newest", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      for (const [key, updatedAt] of [
+        ["new-terminal", "2026-06-24T00:00:03.000Z"],
+        ["old-terminal", "2026-06-24T00:00:01.000Z"],
+        ["failed-job", "2026-06-24T00:00:02.000Z"],
+        ["active-job", "2026-06-24T00:00:00.000Z"],
+      ] as const) {
+        await createJob({ key, repo: ".", prompt: "hello" });
+        const path = `.codexctl/jobs/${key}/job.json`;
+        const job = await Bun.file(path).json();
+        job.updatedAt = updatedAt;
+        if (key === "failed-job") {
+          job.status = "failed";
+          job.error = "boom";
+          job.completedAt = updatedAt;
+        } else if (key !== "active-job") {
+          job.status = "completed";
+          job.completedAt = updatedAt;
+        } else {
+          job.status = "running";
+          job.workerPid = process.pid;
+        }
+        await Bun.write(path, JSON.stringify(job));
+      }
+
+      const dryRun = await pruneJobs({ keep: 1, dryRun: true });
+      expect(dryRun.removed.map((job) => job.key)).toEqual(["old-terminal"]);
+      expect(dryRun.removed[0]?.action).toBe("would_remove");
+      expect(await Bun.file(".codexctl/jobs/old-terminal/job.json").exists()).toBe(true);
+
+      const result = await pruneJobs({ keep: 1 });
+      expect(result.removed.map((job) => job.key)).toEqual(["old-terminal"]);
+      expect(await Bun.file(".codexctl/jobs/new-terminal/job.json").exists()).toBe(true);
+      expect(await Bun.file(".codexctl/jobs/old-terminal/job.json").exists()).toBe(false);
+      expect(await Bun.file(".codexctl/jobs/failed-job/job.json").exists()).toBe(true);
+      expect(await Bun.file(".codexctl/jobs/active-job/job.json").exists()).toBe(true);
+
+      const cli = await runCli(["job", "prune", "--keep", "1", "--dry-run", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).removed).toEqual([]);
+
+      const terminal = await runCli(["job", "prune", "--keep", "0", "--status", "terminal", "--dry-run", "--json"], tmp);
+      expect(terminal.exitCode).toBe(0);
+      expect(JSON.parse(terminal.stdout).removed.map((job: { key: string }) => job.key)).toEqual(["new-terminal", "failed-job"]);
+
+      const extra = await runCli(["job", "prune", "unexpected", "--json"], tmp);
+      expect(extra.exitCode).toBe(2);
+      expect(JSON.parse(extra.stderr).error.code).toBe("usage_error");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
