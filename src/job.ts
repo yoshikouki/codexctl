@@ -7,7 +7,7 @@ export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancell
 
 export class JobOperationError extends Error {
   constructor(
-    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable",
+    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable" | "job_state_changed",
     message: string,
     readonly exitCode = 2,
   ) {
@@ -90,6 +90,10 @@ export type JobRecoveryResult = {
   action: "none" | "restarted" | "failed";
   reason: string;
   job: JobRecord;
+};
+
+export type JobRecoveryOptions = {
+  expectedRecoveryStateId?: string | null;
 };
 
 export type JobCancelResult = {
@@ -214,9 +218,15 @@ export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   return await runJobWorker(record.key);
 }
 
-export async function recoverJob(key: string): Promise<JobRecoveryResult> {
+export async function recoverJob(key: string, options: JobRecoveryOptions = {}): Promise<JobRecoveryResult> {
   const dir = jobDir(process.cwd(), key);
   const record = await readJob(key);
+  if (
+    options.expectedRecoveryStateId
+    && jobRecoveryStateId(record) !== options.expectedRecoveryStateId
+  ) {
+    throw new JobOperationError("job_state_changed", `Job '${key}' changed before recovery could be applied`);
+  }
   if (record.status === "completed" || record.status === "failed" || record.status === "cancelled") {
     return { action: "none", reason: `job is already ${record.status}`, job: record };
   }
@@ -241,6 +251,24 @@ export async function recoverJob(key: string): Promise<JobRecoveryResult> {
     at: new Date().toISOString(),
   });
   return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: record };
+}
+
+export function jobRecoveryStateId(job: {
+  updatedAt: string | null;
+  workerPid: number | null;
+  threadId: string | null;
+  turnId: string | null;
+}): string {
+  return shortStableHash([job.updatedAt, job.workerPid, job.threadId, job.turnId].join("\u0000"));
+}
+
+function shortStableHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 export async function listJobs(): Promise<JobListItem[]> {

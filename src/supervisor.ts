@@ -3,6 +3,7 @@ import { appendFile, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import {
   listJobs,
+  jobRecoveryStateId,
   readApprovals,
   readJobSummary,
   recoverJob,
@@ -69,6 +70,7 @@ export type SupervisorActionKind =
   | "inspect_unreadable";
 
 export type SupervisorAction = {
+  id: string;
   jobKey: string;
   kind: SupervisorActionKind;
   severity: "info" | "attention" | "critical";
@@ -138,8 +140,13 @@ export type SupervisorActionInspectionPayload =
   };
 
 export type SupervisorActionApplyOptions = {
+  actionId?: string | null;
   confirm?: string | null;
   dryRun?: boolean;
+};
+
+export type SupervisorActionInspectOptions = {
+  actionId?: string | null;
 };
 
 export type SupervisorActionApplication = {
@@ -299,7 +306,7 @@ function parseSupervisorActionTickLine(line: string): SupervisorActionHistoryTic
     eventAt: typeof event.at === "string" ? event.at : null,
     tickAt: event.tick.at,
     health: event.tick.health,
-    actions: event.tick.actions,
+    actions: event.tick.actions.map(normalizeSupervisorAction),
   };
 }
 
@@ -316,9 +323,10 @@ export async function planSupervisorActions(): Promise<{ at: string; health: Sup
 export async function inspectSupervisorAction(
   jobKey: string,
   kind: SupervisorActionKind,
+  options: SupervisorActionInspectOptions = {},
 ): Promise<SupervisorActionInspection> {
   const plan = await planSupervisorActions();
-  const action = requireCurrentAction(plan, jobKey, kind);
+  const action = requireCurrentAction(plan, jobKey, kind, options.actionId);
   return {
     at: new Date().toISOString(),
     planAt: plan.at,
@@ -334,7 +342,7 @@ export async function applySupervisorAction(
   options: SupervisorActionApplyOptions = {},
 ): Promise<SupervisorActionApplication> {
   const plan = await planSupervisorActions();
-  const action = requireCurrentAction(plan, jobKey, kind);
+  const action = requireCurrentAction(plan, jobKey, kind, options.actionId);
   if (action.kind !== "inspect_dead_worker") {
     throw new SupervisorOperationError(
       "supervisor_action_not_applicable",
@@ -358,7 +366,9 @@ export async function applySupervisorAction(
     action,
     application: {
       type: "job_recovery",
-      result: dryRun ? null : await recoverJob(jobKey),
+      result: dryRun ? null : await recoverJob(jobKey, {
+        expectedRecoveryStateId: deadWorkerRecoveryStateId(action),
+      }),
     },
   };
 }
@@ -367,12 +377,18 @@ function requireCurrentAction(
   plan: { actions: SupervisorAction[] },
   jobKey: string,
   kind: SupervisorActionKind,
+  actionId?: string | null,
 ): SupervisorAction {
-  const action = plan.actions.find((candidate) => candidate.jobKey === jobKey && candidate.kind === kind);
+  const action = plan.actions.find((candidate) =>
+    candidate.jobKey === jobKey
+    && candidate.kind === kind
+    && (actionId === undefined || actionId === null || candidate.id === actionId)
+  );
   if (!action) {
+    const idClause = actionId ? ` with id '${actionId}'` : "";
     throw new SupervisorOperationError(
       "supervisor_action_not_found",
-      `No supervisor action '${kind}' for job '${jobKey}'`,
+      `No supervisor action '${kind}' for job '${jobKey}'${idClause}`,
     );
   }
   return action;
@@ -450,6 +466,11 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
   for (const job of jobs) {
     if (job.status === "unreadable") {
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "inspect_unreadable",
+          reason: job.error ?? "job record is unreadable",
+        }),
         jobKey: job.key,
         kind: "inspect_unreadable",
         severity: "critical",
@@ -461,6 +482,11 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
 
     if (job.nextAction === "resolve_approval") {
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "resolve_approval",
+          reason: `${job.actionableApprovals} approval request(s) can be resolved`,
+        }),
         jobKey: job.key,
         kind: "resolve_approval",
         severity: "attention",
@@ -473,6 +499,11 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
       const cancelAgeMs = ageSince(job.cancelRequestedAt);
       const severity = severityForAge(cancelAgeMs, WAIT_CANCEL_ATTENTION_MS, WAIT_CANCEL_CRITICAL_MS);
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "wait_cancel",
+          reason: `turn interrupt is queued${ageText(cancelAgeMs)}${job.cancelRequestedAt ? ` since ${job.cancelRequestedAt}` : ""}`,
+        }),
         jobKey: job.key,
         kind: "wait_cancel",
         severity,
@@ -485,6 +516,11 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
 
     if (job.nextAction === "inspect_error") {
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "inspect_error",
+          reason: job.error ?? "job failed",
+        }),
         jobKey: job.key,
         kind: "inspect_error",
         severity: "critical",
@@ -497,6 +533,11 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
       const heartbeatAgeMs = job.workerHealth.heartbeatAgeMs;
       const severity = heartbeatAgeMs !== null && heartbeatAgeMs >= STALE_WORKER_CRITICAL_MS ? "critical" : "attention";
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "inspect_stale_worker",
+          reason: `worker heartbeat is stale${ageText(heartbeatAgeMs)}`,
+        }),
         jobKey: job.key,
         kind: "inspect_stale_worker",
         severity,
@@ -509,6 +550,12 @@ function planJobActions(jobs: JobListItem[]): SupervisorAction[] {
 
     if (job.status === "running" && job.workerHealth && !job.workerHealth.alive) {
       actions.push({
+        id: supervisorActionId({
+          jobKey: job.key,
+          kind: "inspect_dead_worker",
+          reason: `worker is not alive (${job.workerHealth.reason})${ageText(job.workerHealth.heartbeatAgeMs)}`,
+          identity: jobRecoveryStateId(job),
+        }),
         jobKey: job.key,
         kind: "inspect_dead_worker",
         severity: "critical",
@@ -576,11 +623,41 @@ function annotateActionPersistence(
 
 function persistenceKey(action: SupervisorAction): string | null {
   if (action.kind === "resolve_approval") return null;
-  if (action.kind === "wait_cancel") return `${action.jobKey}\u0000${action.kind}`;
+  return action.id;
+}
+
+function deadWorkerRecoveryStateId(action: SupervisorAction): string | null {
+  if (action.kind !== "inspect_dead_worker") return null;
+  const prefix = `${action.jobKey}:${action.kind}:`;
+  if (!action.id.startsWith(prefix)) return null;
+  return action.id.slice(prefix.length);
+}
+
+function normalizeSupervisorAction(action: SupervisorAction): SupervisorAction {
+  if (typeof action.id === "string" && action.id.length > 0) return action;
+  return { ...action, id: supervisorActionId(action) };
+}
+
+function supervisorActionId(
+  action: Pick<SupervisorAction, "jobKey" | "kind" | "reason"> & { identity?: string | null },
+): string {
+  const base = `${action.jobKey}:${action.kind}`;
   if (action.kind === "inspect_error" || action.kind === "inspect_unreadable") {
-    return `${action.jobKey}\u0000${action.kind}\u0000${action.reason}`;
+    return `${base}:${shortStableHash(action.reason)}`;
   }
-  return `${action.jobKey}\u0000${action.kind}`;
+  if (action.kind === "inspect_dead_worker") {
+    return `${base}:${action.identity ?? shortStableHash(action.reason)}`;
+  }
+  return base;
+}
+
+function shortStableHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function annotatePolicyRecommendations(actions: SupervisorAction[]): SupervisorAction[] {

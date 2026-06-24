@@ -49,6 +49,7 @@ class CliError extends Error {
 const knownPublicFlags = [
   "all",
   "approval-policy",
+  "action-id",
   "cancel",
   "confirm",
   "detach",
@@ -254,15 +255,18 @@ export async function main(argv: string[]): Promise<void> {
 
   if (resource === "supervisor" && action === "inspect" && key) {
     requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "kind"]);
-    await printJson(await inspectSupervisorAction(key, supervisorActionKindFlag(args)));
+    allowFlags(args, ["json", "kind", "action-id"]);
+    await printJson(await inspectSupervisorAction(key, supervisorActionKindFlag(args), {
+      actionId: stringFlag(args, "action-id"),
+    }));
     return;
   }
 
   if (resource === "supervisor" && action === "apply" && key) {
     requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "kind", "confirm", "dry-run"]);
+    allowFlags(args, ["json", "kind", "confirm", "dry-run", "action-id"]);
     await printJson(await applySupervisorAction(key, supervisorActionKindFlag(args), {
+      actionId: stringFlag(args, "action-id"),
       confirm: stringFlag(args, "confirm"),
       dryRun: booleanFlag(args, "dry-run"),
     }));
@@ -483,8 +487,8 @@ function usageText(): string {
   codexctl supervisor once [--interval-ms <ms>] --json
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
-  codexctl supervisor inspect <job-key> --kind <action-kind> --json
-  codexctl supervisor apply <job-key> --kind <action-kind> [--dry-run] [--confirm <token>] --json
+  codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
+  codexctl supervisor apply <job-key> --kind <action-kind> [--action-id <id>] [--dry-run] [--confirm <token>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json

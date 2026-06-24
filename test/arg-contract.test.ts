@@ -1022,6 +1022,7 @@ describe("supervisor", () => {
       expect(plan.actions.filter((action) => action.kind === "wait_cancel")).toHaveLength(3);
       expect(plan.actions.find((action) => action.kind === "resolve_approval")?.nextCommand).toBe("codexctl approval list approval-plan --json");
       const cancelAction = plan.actions.find((action) => action.jobKey === "cancel-plan");
+      expect(cancelAction?.id).toBe("cancel-plan:wait_cancel");
       expect(cancelAction?.kind).toBe("wait_cancel");
       expect(cancelAction?.severity).toBe("info");
       expect(cancelAction?.thresholdMs).toBe(60_000);
@@ -1048,6 +1049,7 @@ describe("supervisor", () => {
       expect(staleAttentionAction?.ageMs).toBe(31_000);
       expect(staleAttentionAction?.thresholdMs).toBe(5 * 60_000);
       const staleAction = plan.actions.find((action) => action.jobKey === "stale-plan");
+      expect(staleAction?.id).toBe("stale-plan:inspect_stale_worker");
       expect(staleAction?.kind).toBe("inspect_stale_worker");
       expect(staleAction?.severity).toBe("critical");
       expect(staleAction?.thresholdMs).toBe(5 * 60_000);
@@ -1057,8 +1059,12 @@ describe("supervisor", () => {
       expect(missingHeartbeatAction?.severity).toBe("attention");
       expect(missingHeartbeatAction?.ageMs).toBeNull();
       expect(missingHeartbeatAction?.thresholdMs).toBe(5 * 60_000);
-      expect(plan.actions.find((action) => action.kind === "inspect_dead_worker")?.nextCommand).toBe("codexctl job summary dead-plan --events 20 --json");
+      const deadAction = plan.actions.find((action) => action.kind === "inspect_dead_worker");
+      if (!deadAction) throw new Error("expected dead worker action");
+      expect(deadAction.id).toMatch(/^dead-plan:inspect_dead_worker:[0-9a-f]{8}$/);
+      expect(deadAction?.nextCommand).toBe("codexctl job summary dead-plan --events 20 --json");
       expect(plan.actions.find((action) => action.kind === "inspect_unreadable")?.severity).toBe("critical");
+      expect(plan.actions.find((action) => action.jobKey === "failed-plan")?.id).toMatch(/^failed-plan:inspect_error:[0-9a-f]{8}$/);
 
       const cli = await runCli(["supervisor", "plan", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
@@ -1072,6 +1078,7 @@ describe("supervisor", () => {
       expect(approvalInspection.inspection.approvals).toHaveLength(1);
 
       const failedInspection = await inspectSupervisorAction("failed-plan", "inspect_error");
+      expect(failedInspection.action.id).toMatch(/^failed-plan:inspect_error:[0-9a-f]{8}$/);
       expect(failedInspection.action.policy?.recommendation).toBe("inspect");
       expect(failedInspection.inspection.type).toBe("job_summary");
       if (failedInspection.inspection.type !== "job_summary") throw new Error("expected job summary inspection");
@@ -1087,6 +1094,38 @@ describe("supervisor", () => {
       expect(inspectCli.exitCode).toBe(0);
       expect(inspectCli.stderr).toBe("");
       expect(JSON.parse(inspectCli.stdout).inspection.summary.error).toBe("boom");
+
+      const inspectByIdCli = await runCli([
+        "supervisor",
+        "inspect",
+        "failed-plan",
+        "--kind",
+        "inspect_error",
+        "--action-id",
+        failedInspection.action.id,
+        "--json",
+      ], tmp);
+      expect(inspectByIdCli.exitCode).toBe(0);
+      expect(JSON.parse(inspectByIdCli.stdout).action.id).toBe(failedInspection.action.id);
+
+      const wrongIdInspection = await runCli([
+        "supervisor",
+        "inspect",
+        "failed-plan",
+        "--kind",
+        "inspect_error",
+        "--action-id",
+        "wrong-action-id",
+        "--json",
+      ], tmp);
+      expect(wrongIdInspection.exitCode).toBe(2);
+      expect(JSON.parse(wrongIdInspection.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "supervisor_action_not_found",
+          message: "No supervisor action 'inspect_error' for job 'failed-plan' with id 'wrong-action-id'",
+        },
+      });
 
       const missingAction = await runCli(["supervisor", "inspect", "failed-plan", "--kind", "wait_cancel", "--json"], tmp);
       expect(missingAction.exitCode).toBe(2);
@@ -1111,6 +1150,7 @@ describe("supervisor", () => {
       const deadPlanJobBeforeDryRun = await Bun.file(".codexctl/jobs/dead-plan/job.json").text();
       const deadPlanEventsBeforeDryRun = await Bun.file(".codexctl/jobs/dead-plan/events.jsonl").text();
       const dryRunApply = await applySupervisorAction("dead-plan", "inspect_dead_worker", { dryRun: true });
+      expect(dryRunApply.action.id).toBe(deadAction.id);
       expect(dryRunApply.dryRun).toBe(true);
       expect(dryRunApply.applied).toBe(false);
       expect(dryRunApply.requiredConfirmation).toBe("recover-dead-worker");
@@ -1124,6 +1164,39 @@ describe("supervisor", () => {
       const dryRunCli = await runCli(["supervisor", "apply", "dead-plan", "--kind", "inspect_dead_worker", "--dry-run", "--json"], tmp);
       expect(dryRunCli.exitCode).toBe(0);
       expect(JSON.parse(dryRunCli.stdout).requiredConfirmation).toBe("recover-dead-worker");
+
+      const dryRunByIdCli = await runCli([
+        "supervisor",
+        "apply",
+        "dead-plan",
+        "--kind",
+        "inspect_dead_worker",
+        "--action-id",
+        deadAction.id,
+        "--dry-run",
+        "--json",
+      ], tmp);
+      expect(dryRunByIdCli.exitCode).toBe(0);
+      expect(JSON.parse(dryRunByIdCli.stdout).action.id).toBe(deadAction.id);
+
+      const changedDead = await Bun.file(".codexctl/jobs/dead-plan/job.json").json();
+      changedDead.updatedAt = "2026-06-24T00:00:09.000Z";
+      await Bun.write(".codexctl/jobs/dead-plan/job.json", JSON.stringify(changedDead));
+      const staleIdApply = await runCli([
+        "supervisor",
+        "apply",
+        "dead-plan",
+        "--kind",
+        "inspect_dead_worker",
+        "--action-id",
+        deadAction.id,
+        "--dry-run",
+        "--json",
+      ], tmp);
+      expect(staleIdApply.exitCode).toBe(2);
+      expect(JSON.parse(staleIdApply.stderr).error.code).toBe("supervisor_action_not_found");
+      expect((await planSupervisorActions()).actions.find((action) => action.jobKey === "dead-plan")?.id).not.toBe(deadAction.id);
+      await expect(recoverJob("dead-plan", { expectedRecoveryStateId: "stale-state" })).rejects.toThrow("changed before recovery");
 
       const missingConfirmCli = await runCli(["supervisor", "apply", "dead-plan", "--kind", "inspect_dead_worker", "--json"], tmp);
       expect(missingConfirmCli.exitCode).toBe(2);
@@ -1226,6 +1299,7 @@ describe("supervisor", () => {
       expect(history.eventsScanned).toBe(2);
       expect(history.tickCount).toBe(1);
       expect(history.latestTickAt).toBe(tickEvents[1]?.tick.at ?? null);
+      expect(history.latestActions[0]?.id).toBe("persistent-cancel:wait_cancel");
       expect(history.latestActions[0]?.seenTicks).toBe(2);
       expect(history.ticks[0]?.actions[0]?.seenTicks).toBe(2);
 
@@ -1266,11 +1340,33 @@ describe("supervisor", () => {
 
       await Bun.write(
         ".codexctl/supervisor/events.jsonl",
+        await Bun.file(".codexctl/supervisor/events.jsonl").text() + JSON.stringify({
+          type: "supervisor.tick",
+          at: "2026-06-24T00:00:00.000Z",
+          tick: {
+            at: "2026-06-24T00:00:00.000Z",
+            health: state.lastTick?.health,
+            actions: [{
+              jobKey: "legacy-failed",
+              kind: "inspect_error",
+              severity: "critical",
+              reason: "legacy boom",
+              nextCommand: "codexctl job summary legacy-failed --events 20 --json",
+            }],
+            recovered: [],
+          },
+        }) + "\n",
+      );
+      const legacyHistory = await readSupervisorActionHistory(1);
+      expect(legacyHistory.latestActions[0]?.id).toMatch(/^legacy-failed:inspect_error:[0-9a-f]{8}$/);
+
+      await Bun.write(
+        ".codexctl/supervisor/events.jsonl",
         await Bun.file(".codexctl/supervisor/events.jsonl").text() + "{not-json}\n",
       );
       const corruptTailHistory = await readSupervisorActionHistory(1);
       expect(corruptTailHistory.tickCount).toBe(1);
-      expect(corruptTailHistory.latestActions[0]?.seenTicks).toBe(2);
+      expect(corruptTailHistory.latestActions[0]?.id).toMatch(/^legacy-failed:inspect_error:[0-9a-f]{8}$/);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
