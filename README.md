@@ -14,6 +14,7 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl job watch demo --format compact --json` follows a compact lifecycle stream until the job is terminal.
 - `codexctl job watch demo --format raw --json` follows the raw persisted app-server event log.
 - `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
+- `codexctl job cancel demo --json` interrupts an active turn or cancels a queued job.
 - `codexctl job recover demo --json` reconciles a queued or stale running job.
 - `codexctl job sweep --json` reconciles all queued or running local jobs.
 - `codexctl approval list demo --json` lists pending approval requests.
@@ -27,6 +28,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 `job summary` is the quickest post-run view for agents: it returns the current job record, `nextAction`, pending and actionable approvals, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. Use `--events 0` when the caller wants the stable summary fields without the event tail.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
+
+`job cancel` marks queued jobs as `cancelled` immediately. For running jobs, it appends a `turn.interrupt` control command once; repeated cancel requests return `already_requested`. While the interrupt is pending, `job summary` returns `nextAction: "wait_cancel"` with `cancelRequestedAt` and `cancelCommandId`. The active worker sends app-server `turn/interrupt` on the same stdio connection and the job becomes `cancelled` when app-server completes the turn as interrupted. If the worker is already gone for an in-flight app-server turn, cancel marks the job failed instead of queuing an unreachable interrupt.
 
 When a `--json` command fails, `codexctl` writes a structured error to stderr:
 

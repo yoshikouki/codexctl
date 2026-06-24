@@ -6,6 +6,7 @@ import { parseArgs } from "../src/cli.ts";
 import { compactJobEvent } from "../src/events.ts";
 import {
   approvalResponseFor,
+  cancelJob,
   createJob,
   enqueueApprovalDecision,
   enqueueSteer,
@@ -512,6 +513,64 @@ describe("event store", () => {
       await rm(tmp, { recursive: true, force: true });
     }
   });
+
+  test("cancelJob enqueues an interrupt control command for running jobs", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "cancel-running-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/cancel-running-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const result = await cancelJob("cancel-running-test");
+      expect(result.action).toBe("interrupt_queued");
+      expect(result.command?.type).toBe("turn.interrupt");
+      expect(typeof result.job.cancelRequestedAt).toBe("string");
+      const summary = await readJobSummary("cancel-running-test", 0);
+      expect(summary.nextAction).toBe("wait_cancel");
+      expect(summary.canResolveApprovals).toBe(false);
+      expect(await Bun.file(".codexctl/jobs/cancel-running-test/control.jsonl").text()).toContain("turn.interrupt");
+
+      const cli = await runCli(["job", "cancel", "cancel-running-test", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).action).toBe("already_requested");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("cancelJob fails stale in-flight jobs instead of queuing unreachable interrupts", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "cancel-stale-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/cancel-stale-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const result = await cancelJob("cancel-stale-test");
+      expect(result.action).toBe("failed");
+      expect(result.job.status).toBe("failed");
+      expect(result.job.error).toContain("cannot be interrupted");
+      expect(await Bun.file(".codexctl/jobs/cancel-stale-test/control.jsonl").text()).toBe("");
+      expect(await Bun.file(".codexctl/jobs/cancel-stale-test/events.jsonl").text()).toContain("cancel.failed");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("job control files", () => {
@@ -546,6 +605,25 @@ describe("job control files", () => {
       const command = await enqueueSteer("steer-test", "adjust");
       expect(command.type).toBe("turn.steer");
       expect(await Bun.file(".codexctl/jobs/steer-test/control.jsonl").text()).toContain("adjust");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("cancelJob marks queued jobs cancelled without a worker command", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "cancel-queued-test", repo: ".", prompt: "hello" });
+      const result = await cancelJob("cancel-queued-test");
+      expect(result.action).toBe("cancelled");
+      expect(result.command).toBeNull();
+      expect(result.job.status).toBe("cancelled");
+      expect(result.job.error).toBeNull();
+      expect((await readJobSummary("cancel-queued-test", 0)).nextAction).toBe("cancelled");
+      expect(await Bun.file(".codexctl/jobs/cancel-queued-test/events.jsonl").text()).toContain("job.cancelled");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

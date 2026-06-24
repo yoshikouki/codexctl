@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
 import { compactJobEvent, type CompactJobEvent } from "./events.ts";
 
-export type JobStatus = "queued" | "running" | "completed" | "failed";
+export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type JobRecord = {
   key: string;
@@ -20,6 +20,8 @@ export type JobRecord = {
   workerPid: number | null;
   threadId: string | null;
   turnId: string | null;
+  cancelRequestedAt: string | null;
+  cancelCommandId: string | null;
   approvals: ApprovalRecord[];
   finalResponse: string;
   error: string | null;
@@ -54,7 +56,13 @@ export type ApprovalResolveCommand = {
   decision: "approve" | "approveForSession" | "reject" | "cancel";
 };
 
-export type ControlCommand = TurnSteerCommand | ApprovalResolveCommand;
+export type TurnInterruptCommand = {
+  id: string;
+  type: "turn.interrupt";
+  at: string;
+};
+
+export type ControlCommand = TurnSteerCommand | ApprovalResolveCommand | TurnInterruptCommand;
 
 export type StartJobOptions = {
   key: string;
@@ -73,6 +81,13 @@ export type JobRecoveryResult = {
   job: JobRecord;
 };
 
+export type JobCancelResult = {
+  action: "cancelled" | "interrupt_queued" | "already_requested" | "failed" | "none";
+  reason: string;
+  job: JobRecord;
+  command: TurnInterruptCommand | null;
+};
+
 export type JobListItem = {
   key: string;
   status: JobStatus | "unreadable";
@@ -87,7 +102,7 @@ export type JobListItem = {
 export type JobSummary = {
   key: string;
   status: JobStatus;
-  nextAction: "wait" | "resolve_approval" | "read_result" | "inspect_error";
+  nextAction: "wait" | "wait_cancel" | "resolve_approval" | "read_result" | "inspect_error" | "cancelled";
   repo: string;
   prompt: string;
   model: string | null;
@@ -100,6 +115,8 @@ export type JobSummary = {
   workerPid: number | null;
   threadId: string | null;
   turnId: string | null;
+  cancelRequestedAt: string | null;
+  cancelCommandId: string | null;
   pendingApprovals: ApprovalRecord[];
   actionableApprovals: ApprovalRecord[];
   canResolveApprovals: boolean;
@@ -139,7 +156,7 @@ export async function startJob(options: StartJobOptions): Promise<JobRecord> {
 export async function recoverJob(key: string): Promise<JobRecoveryResult> {
   const dir = jobDir(process.cwd(), key);
   const record = await readJob(key);
-  if (record.status === "completed" || record.status === "failed") {
+  if (record.status === "completed" || record.status === "failed" || record.status === "cancelled") {
     return { action: "none", reason: `job is already ${record.status}`, job: record };
   }
   if (record.status === "queued") {
@@ -200,6 +217,81 @@ export async function sweepJobs(): Promise<JobRecoveryResult[]> {
   return results;
 }
 
+export async function cancelJob(key: string): Promise<JobCancelResult> {
+  const dir = jobDir(process.cwd(), key);
+  const job = await readJob(key);
+  if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+    return { action: "none", reason: `job is already ${job.status}`, job, command: null };
+  }
+  if (job.status === "queued") {
+    const now = new Date().toISOString();
+    job.status = "cancelled";
+    job.error = null;
+    job.cancelRequestedAt = now;
+    job.completedAt = now;
+    job.updatedAt = now;
+    await writeJobRecord(dir, job);
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "job.cancelled", reason: "queued" },
+      at: now,
+    });
+    return { action: "cancelled", reason: "queued job cancelled before worker start", job, command: null };
+  }
+
+  if (job.cancelRequestedAt) {
+    return { action: "already_requested", reason: "turn interrupt command was already queued", job, command: null };
+  }
+
+  if (!isProcessAlive(job.workerPid)) {
+    const now = new Date().toISOString();
+    if (!job.threadId && !job.turnId) {
+      job.status = "cancelled";
+      job.error = null;
+      job.cancelRequestedAt = now;
+      job.completedAt = now;
+      job.updatedAt = now;
+      await writeJobRecord(dir, job);
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "job.cancelled", reason: "worker_not_alive_before_turn_start", workerPid: job.workerPid },
+        at: now,
+      });
+      return { action: "cancelled", reason: "worker was not alive before turn start", job, command: null };
+    }
+
+    job.status = "failed";
+    job.error = "worker process is not alive; in-flight app-server stdio sessions cannot be interrupted";
+    job.completedAt = now;
+    job.updatedAt = now;
+    await writeJobRecord(dir, job);
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "cancel.failed", reason: "in_flight_stdio_session_not_interruptible", workerPid: job.workerPid },
+      at: now,
+    });
+    return { action: "failed", reason: "in-flight app-server stdio session cannot be interrupted", job, command: null };
+  }
+
+  const now = new Date().toISOString();
+  const command: TurnInterruptCommand = {
+    id: crypto.randomUUID(),
+    type: "turn.interrupt",
+    at: now,
+  };
+  job.cancelRequestedAt = now;
+  job.cancelCommandId = command.id;
+  job.updatedAt = now;
+  await writeJobRecord(dir, job);
+  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  await appendEvent(dir, {
+    direction: "control",
+    command,
+    at: now,
+  });
+  return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
+}
+
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
   const root = process.cwd();
@@ -229,6 +321,8 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
     workerPid: null,
     threadId: null,
     turnId: null,
+    cancelRequestedAt: null,
+    cancelCommandId: null,
     approvals: [],
     finalResponse: "",
     error: null,
@@ -357,12 +451,12 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
   const compactEvents = (await readJobEvents(key)).flatMap((event) => compactJobEvent(event));
   const recentEvents = eventLimit <= 0 ? [] : compactEvents.slice(-eventLimit);
   const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
-  const canResolveApprovals = job.status === "running";
+  const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
   const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
   return {
     key: job.key,
     status: job.status,
-    nextAction: nextAction(job.status, actionableApprovals),
+    nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     repo: job.repo,
     prompt: job.prompt,
     model: job.model,
@@ -375,6 +469,8 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     workerPid: job.workerPid,
     threadId: job.threadId,
     turnId: job.turnId,
+    cancelRequestedAt: job.cancelRequestedAt,
+    cancelCommandId: job.cancelCommandId,
     pendingApprovals,
     actionableApprovals,
     canResolveApprovals,
@@ -518,8 +614,8 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
   }
   if (method === "turn/completed") {
     const status = getNestedString(params, ["turn", "status"]);
-    record.status = status === "failed" ? "failed" : "completed";
-    record.error = getNestedString(params, ["turn", "error", "message"]);
+    record.status = status === "failed" ? "failed" : status === "interrupted" ? "cancelled" : "completed";
+    record.error = record.status === "cancelled" ? null : getNestedString(params, ["turn", "error", "message"]);
     record.completedAt = new Date().toISOString();
   }
   if (method === "error") {
@@ -563,6 +659,29 @@ async function processControlCommands(
       await appendEvent(dir, {
         direction: "worker",
         event: { type: "control.applied", commandId: command.id, method: "turn/steer" },
+        at: new Date().toISOString(),
+      });
+    }
+    if (command.type === "turn.interrupt") {
+      record.cancelRequestedAt ??= command.at;
+      record.cancelCommandId ??= command.id;
+      record.updatedAt = new Date().toISOString();
+      await writeJobRecord(dir, record);
+      if (!record.threadId || !record.turnId) {
+        await appendEvent(dir, {
+          direction: "worker",
+          event: { type: "control.rejected", commandId: command.id, reason: "turn_not_started" },
+          at: new Date().toISOString(),
+        });
+        continue;
+      }
+      await client.request("turn/interrupt", {
+        threadId: record.threadId,
+        turnId: record.turnId,
+      });
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "control.applied", commandId: command.id, method: "turn/interrupt" },
         at: new Date().toISOString(),
       });
     }
@@ -776,10 +895,13 @@ function approvalCounts(approvals: ApprovalRecord[]): Record<ApprovalStatus, num
 function nextAction(
   status: JobStatus,
   actionableApprovals: ApprovalRecord[],
+  cancelRequestedAt: string | null = null,
 ): JobSummary["nextAction"] {
+  if (status === "running" && cancelRequestedAt) return "wait_cancel";
   if (actionableApprovals.length > 0) return "resolve_approval";
   if (status === "queued" || status === "running") return "wait";
   if (status === "failed") return "inspect_error";
+  if (status === "cancelled") return "cancelled";
   return "read_result";
 }
 
@@ -835,7 +957,7 @@ function summarizeCompactEvents(events: CompactJobEvent[], eventLimit: number): 
 function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
   if (!isObject(value)) throw new Error("job.json did not contain an object");
   const now = new Date().toISOString();
-  const status = value.status === "queued" || value.status === "running" || value.status === "completed" || value.status === "failed"
+  const status = value.status === "queued" || value.status === "running" || value.status === "completed" || value.status === "failed" || value.status === "cancelled"
     ? value.status
     : "failed";
   return {
@@ -853,6 +975,8 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     workerPid: typeof value.workerPid === "number" ? value.workerPid : null,
     threadId: typeof value.threadId === "string" ? value.threadId : null,
     turnId: typeof value.turnId === "string" ? value.turnId : null,
+    cancelRequestedAt: typeof value.cancelRequestedAt === "string" ? value.cancelRequestedAt : null,
+    cancelCommandId: typeof value.cancelCommandId === "string" ? value.cancelCommandId : null,
     approvals: Array.isArray(value.approvals) ? value.approvals as ApprovalRecord[] : [],
     finalResponse: typeof value.finalResponse === "string" ? value.finalResponse : "",
     error: typeof value.error === "string" ? value.error : null,

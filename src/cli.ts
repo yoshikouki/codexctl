@@ -2,6 +2,7 @@
 import { readDaemonVersion } from "./app-server.ts";
 import { compactJobEvent } from "./events.ts";
 import {
+  cancelJob,
   enqueueApprovalDecision,
   enqueueSteer,
   listJobs,
@@ -149,6 +150,12 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "steer" && key) {
     allowFlags(args, ["json", "prompt"]);
     await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
+    return;
+  }
+
+  if (resource === "job" && action === "cancel" && key) {
+    allowFlags(args, ["json"]);
+    await printJson(await cancelJob(key));
     return;
   }
 
@@ -352,6 +359,7 @@ function usageText(): string {
   codexctl job events <key> [--format raw|compact] --json
   codexctl job watch <key> [--format raw|compact] --json
   codexctl job steer <key> --prompt <prompt> --json
+  codexctl job cancel <key> --json
   codexctl job recover <key> --json
   codexctl job sweep --json
   codexctl approval list <job-key> [--all] --json
@@ -380,7 +388,7 @@ async function watchJob(key: string, format: "raw" | "compact"): Promise<void> {
       }
     }
     const job = await readJob(key);
-    if (job.status === "completed" || job.status === "failed") {
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
       return;
     }
     await Bun.sleep(500);
