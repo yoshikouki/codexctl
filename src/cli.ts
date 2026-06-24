@@ -21,6 +21,7 @@ import {
   workerHealth,
 } from "./job.ts";
 import {
+  applySupervisorAction,
   inspectSupervisorAction,
   planSupervisorActions,
   readSupervisorActionHistory,
@@ -49,6 +50,7 @@ const knownPublicFlags = [
   "all",
   "approval-policy",
   "cancel",
+  "confirm",
   "detach",
   "events",
   "for-session",
@@ -254,6 +256,16 @@ export async function main(argv: string[]): Promise<void> {
     requirePositionalCount(args, 3);
     allowFlags(args, ["json", "kind"]);
     await printJson(await inspectSupervisorAction(key, supervisorActionKindFlag(args)));
+    return;
+  }
+
+  if (resource === "supervisor" && action === "apply" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json", "kind", "confirm", "dry-run"]);
+    await printJson(await applySupervisorAction(key, supervisorActionKindFlag(args), {
+      confirm: stringFlag(args, "confirm"),
+      dryRun: booleanFlag(args, "dry-run"),
+    }));
     return;
   }
 
@@ -472,6 +484,7 @@ function usageText(): string {
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
   codexctl supervisor inspect <job-key> --kind <action-kind> --json
+  codexctl supervisor apply <job-key> --kind <action-kind> [--dry-run] [--confirm <token>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
   codexctl supervisor status --json
   codexctl supervisor events --json

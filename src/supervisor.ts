@@ -5,6 +5,7 @@ import {
   listJobs,
   readApprovals,
   readJobSummary,
+  recoverJob,
   sweepJobs,
   type ApprovalRecord,
   type JobListItem,
@@ -17,6 +18,7 @@ const WAIT_CANCEL_ATTENTION_MS = 60_000;
 const WAIT_CANCEL_CRITICAL_MS = 5 * 60_000;
 const STALE_WORKER_CRITICAL_MS = 5 * 60_000;
 const POLICY_PERSISTENCE_TICKS = 3;
+const RECOVER_DEAD_WORKER_CONFIRMATION = "recover-dead-worker";
 
 export type SupervisorTick = {
   at: string;
@@ -82,7 +84,7 @@ export type SupervisorAction = {
 
 export class SupervisorOperationError extends Error {
   constructor(
-    readonly code: "supervisor_action_not_found",
+    readonly code: "supervisor_action_not_found" | "supervisor_action_not_applicable" | "supervisor_confirmation_required",
     message: string,
     readonly exitCode = 2,
   ) {
@@ -134,6 +136,25 @@ export type SupervisorActionInspectionPayload =
     type: "unreadable_job";
     error: string;
   };
+
+export type SupervisorActionApplyOptions = {
+  confirm?: string | null;
+  dryRun?: boolean;
+};
+
+export type SupervisorActionApplication = {
+  at: string;
+  planAt: string;
+  readOnly: false;
+  dryRun: boolean;
+  applied: boolean;
+  requiredConfirmation: string;
+  action: SupervisorAction;
+  application: {
+    type: "job_recovery";
+    result: JobRecoveryResult | null;
+  };
+};
 
 export async function runSupervisor(options: SupervisorRunOptions): Promise<SupervisorState> {
   const dir = supervisorDir(process.cwd());
@@ -297,13 +318,7 @@ export async function inspectSupervisorAction(
   kind: SupervisorActionKind,
 ): Promise<SupervisorActionInspection> {
   const plan = await planSupervisorActions();
-  const action = plan.actions.find((candidate) => candidate.jobKey === jobKey && candidate.kind === kind);
-  if (!action) {
-    throw new SupervisorOperationError(
-      "supervisor_action_not_found",
-      `No supervisor action '${kind}' for job '${jobKey}'`,
-    );
-  }
+  const action = requireCurrentAction(plan, jobKey, kind);
   return {
     at: new Date().toISOString(),
     planAt: plan.at,
@@ -311,6 +326,56 @@ export async function inspectSupervisorAction(
     action,
     inspection: await inspectActionPayload(action),
   };
+}
+
+export async function applySupervisorAction(
+  jobKey: string,
+  kind: SupervisorActionKind,
+  options: SupervisorActionApplyOptions = {},
+): Promise<SupervisorActionApplication> {
+  const plan = await planSupervisorActions();
+  const action = requireCurrentAction(plan, jobKey, kind);
+  if (action.kind !== "inspect_dead_worker") {
+    throw new SupervisorOperationError(
+      "supervisor_action_not_applicable",
+      `Supervisor action '${kind}' for job '${jobKey}' has no mutating apply operation`,
+    );
+  }
+  const dryRun = options.dryRun ?? false;
+  if (!dryRun && options.confirm !== RECOVER_DEAD_WORKER_CONFIRMATION) {
+    throw new SupervisorOperationError(
+      "supervisor_confirmation_required",
+      `Applying '${kind}' for job '${jobKey}' requires --confirm ${RECOVER_DEAD_WORKER_CONFIRMATION}`,
+    );
+  }
+  return {
+    at: new Date().toISOString(),
+    planAt: plan.at,
+    readOnly: false,
+    dryRun,
+    applied: !dryRun,
+    requiredConfirmation: RECOVER_DEAD_WORKER_CONFIRMATION,
+    action,
+    application: {
+      type: "job_recovery",
+      result: dryRun ? null : await recoverJob(jobKey),
+    },
+  };
+}
+
+function requireCurrentAction(
+  plan: { actions: SupervisorAction[] },
+  jobKey: string,
+  kind: SupervisorActionKind,
+): SupervisorAction {
+  const action = plan.actions.find((candidate) => candidate.jobKey === jobKey && candidate.kind === kind);
+  if (!action) {
+    throw new SupervisorOperationError(
+      "supervisor_action_not_found",
+      `No supervisor action '${kind}' for job '${jobKey}'`,
+    );
+  }
+  return action;
 }
 
 async function inspectActionPayload(action: SupervisorAction): Promise<SupervisorActionInspectionPayload> {

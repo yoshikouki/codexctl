@@ -21,6 +21,7 @@ import {
   sweepJobs,
 } from "../src/job.ts";
 import {
+  applySupervisorAction,
   inspectSupervisorAction,
   planSupervisorActions,
   readSupervisorActionHistory,
@@ -1106,6 +1107,41 @@ describe("supervisor", () => {
           message: "--kind must be one of: resolve_approval, wait_cancel, inspect_error, inspect_stale_worker, inspect_dead_worker, inspect_unreadable",
         },
       });
+
+      const deadPlanJobBeforeDryRun = await Bun.file(".codexctl/jobs/dead-plan/job.json").text();
+      const deadPlanEventsBeforeDryRun = await Bun.file(".codexctl/jobs/dead-plan/events.jsonl").text();
+      const dryRunApply = await applySupervisorAction("dead-plan", "inspect_dead_worker", { dryRun: true });
+      expect(dryRunApply.dryRun).toBe(true);
+      expect(dryRunApply.applied).toBe(false);
+      expect(dryRunApply.requiredConfirmation).toBe("recover-dead-worker");
+      expect(dryRunApply.application.result).toBeNull();
+      expect(await Bun.file(".codexctl/jobs/dead-plan/job.json").text()).toBe(deadPlanJobBeforeDryRun);
+      expect(await Bun.file(".codexctl/jobs/dead-plan/events.jsonl").text()).toBe(deadPlanEventsBeforeDryRun);
+
+      await expect(applySupervisorAction("failed-plan", "inspect_error", { dryRun: true })).rejects.toThrow("has no mutating apply operation");
+      await expect(applySupervisorAction("dead-plan", "inspect_dead_worker")).rejects.toThrow("requires --confirm recover-dead-worker");
+
+      const dryRunCli = await runCli(["supervisor", "apply", "dead-plan", "--kind", "inspect_dead_worker", "--dry-run", "--json"], tmp);
+      expect(dryRunCli.exitCode).toBe(0);
+      expect(JSON.parse(dryRunCli.stdout).requiredConfirmation).toBe("recover-dead-worker");
+
+      const missingConfirmCli = await runCli(["supervisor", "apply", "dead-plan", "--kind", "inspect_dead_worker", "--json"], tmp);
+      expect(missingConfirmCli.exitCode).toBe(2);
+      expect(JSON.parse(missingConfirmCli.stderr)).toEqual({
+        ok: false,
+        error: {
+          code: "supervisor_confirmation_required",
+          message: "Applying 'inspect_dead_worker' for job 'dead-plan' requires --confirm recover-dead-worker",
+        },
+      });
+
+      const applyCli = await runCli(["supervisor", "apply", "dead-plan", "--kind", "inspect_dead_worker", "--confirm", "recover-dead-worker", "--json"], tmp);
+      expect(applyCli.exitCode).toBe(0);
+      const applyBody = JSON.parse(applyCli.stdout);
+      expect(applyBody.applied).toBe(true);
+      expect(applyBody.application.type).toBe("job_recovery");
+      expect(applyBody.application.result.action).toBe("failed");
+      expect(applyBody.application.result.job.status).toBe("failed");
     } finally {
       Date.now = realDateNow;
       process.chdir(cwd);

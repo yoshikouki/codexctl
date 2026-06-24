@@ -49,6 +49,8 @@ codexctl supervisor once --json
 codexctl supervisor plan --json
 codexctl supervisor actions --ticks 10 --json
 codexctl supervisor inspect demo --kind inspect_error --json
+codexctl supervisor apply demo --kind inspect_dead_worker --dry-run --json
+codexctl supervisor apply demo --kind inspect_dead_worker --confirm recover-dead-worker --json
 codexctl supervisor run --interval-ms 1000 --json
 codexctl supervisor status --json
 codexctl supervisor events --json
@@ -92,6 +94,8 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 `supervisor actions` scans `.codexctl/supervisor/events.jsonl` from the tail and returns bounded recent `supervisor.tick` action history. It includes `tickLimit`, `eventsScanned` for the tail lines inspected, `tickCount`, `latestTickAt`, `latestActions`, and `ticks[]` with each tick's action list and health summary. It is read-only: it does not sweep jobs, execute `nextCommand`, or apply policy recommendations.
 
 `supervisor inspect <job-key> --kind <action-kind>` validates that the current supervisor plan still contains the requested action, then returns typed read-only inspection data. `resolve_approval` returns `inspection.type: "approval_list"` with pending approvals. `wait_cancel`, `inspect_error`, `inspect_stale_worker`, and `inspect_dead_worker` return `inspection.type: "job_summary"` with the event tail size used for that action. `inspect_unreadable` returns `inspection.type: "unreadable_job"` with the plan error, without trying to parse the broken job record. This command does not execute the action's `nextCommand` shell string, resolve approvals, recover jobs, or mutate state. If the action is no longer current, stderr uses `supervisor_action_not_found`.
+
+`supervisor apply <job-key> --kind <action-kind>` is the explicit gate for mutating supervisor actions. The only supported mutation is a current `inspect_dead_worker` action, which runs the same recovery path as `job recover`. A real apply requires `--confirm recover-dead-worker`; otherwise stderr uses `supervisor_confirmation_required`. `--dry-run` returns the action, `requiredConfirmation`, and `application.result: null` without mutating state. If the requested action is not current, stderr uses `supervisor_action_not_found`; if it is current but has no supported mutation, stderr uses `supervisor_action_not_applicable`. This command does not resolve approvals, cancel jobs, remove records, or act on stale-but-live workers.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary and the same non-executing action plan so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 

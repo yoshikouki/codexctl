@@ -24,6 +24,7 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl supervisor plan --json` returns recommended next actions without executing them.
 - `codexctl supervisor actions --ticks 10 --json` reads recent supervisor action history.
 - `codexctl supervisor inspect demo --kind inspect_error --json` resolves one current supervisor action into typed read-only inspection data.
+- `codexctl supervisor apply demo --kind inspect_dead_worker --confirm recover-dead-worker --json` applies the one supported mutating supervisor action after an explicit confirmation token.
 - `codexctl supervisor run --interval-ms 1000 --json` keeps sweeping queued or running jobs.
 - `codexctl job result demo --json` reads the persisted result.
 - `codexctl job events demo --json` streams the persisted event log.
@@ -43,6 +44,8 @@ Running workers refresh `worker-heartbeat.json`, which is overlaid onto job read
 `supervisor actions` reads the append-only supervisor event log and returns the most recent tick action history. It does not sweep jobs, run policy, or mutate state. Use `--ticks <n>` to bound how much history a controller reads before deciding whether to inspect, escalate, or keep waiting.
 
 `supervisor inspect` checks the current supervisor plan for a specific `jobKey` and action `kind`, then returns typed read-only inspection data. Approval actions return pending approvals, most inspection actions return `job summary`, and unreadable job actions return the plan error without trying to parse the broken job record. It does not execute the `nextCommand` shell string, resolve approvals, recover jobs, or mutate state.
+
+`supervisor apply` is the explicit gate for mutating supervisor actions. The only supported mutation is applying a current `inspect_dead_worker` action by running the same recovery logic as `job recover`. It requires `--confirm recover-dead-worker`; without that token it fails with `supervisor_confirmation_required`. Use `--dry-run` to return the current action and required confirmation without mutating state. It does not approve requests, cancel jobs, delete records, or act on stale-but-live workers.
 
 `job rm` and `job prune` only clean local `.codexctl/jobs` records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
 
