@@ -91,6 +91,14 @@ export type StartJobOptions = {
   detach?: boolean;
 };
 
+export type RunJobOptions = Omit<StartJobOptions, "detach"> & JobWaitOptions;
+
+export type JobRunResult = {
+  key: string;
+  started: JobRecord;
+  wait: JobWaitResult;
+};
+
 export type JobRecoveryResult = {
   action: "none" | "restarted" | "failed";
   reason: string;
@@ -290,6 +298,19 @@ export async function startJob(options: StartJobOptions): Promise<JobRecord> {
     return await spawnDetachedWorker(record, dir, "start");
   }
   return await runJobWorker(record.key);
+}
+
+export async function runJob(options: RunJobOptions): Promise<JobRunResult> {
+  const started = await startJob({ ...options, detach: true });
+  return {
+    key: started.key,
+    started,
+    wait: await waitForJob(started.key, {
+      eventLimit: options.eventLimit,
+      intervalMs: options.intervalMs,
+      timeoutMs: options.timeoutMs,
+    }),
+  };
 }
 
 export async function recoverJob(key: string, options: JobRecoveryOptions = {}): Promise<JobRecoveryResult> {
@@ -566,8 +587,18 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   await mkdir(dir, { recursive: true });
   return await withJobRecordLock(dir, options.key, async () => {
     const existingJob = Bun.file(`${dir}/job.json`);
-    if ((await existingJob.exists()) && !options.force) {
-      throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
+    if (await existingJob.exists()) {
+      if (!options.force) {
+        throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
+      }
+      try {
+        const existing = await readPersistedJobRecord(dir, options.key);
+        if (existing.workerPid !== null && isProcessAlive(existing.workerPid)) {
+          throw new JobOperationError("job_worker_alive", `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`);
+        }
+      } catch (error) {
+        if (error instanceof JobOperationError) throw error;
+      }
     }
     await Bun.write(`${dir}/events.jsonl`, "");
     await Bun.write(`${dir}/control.jsonl`, "");

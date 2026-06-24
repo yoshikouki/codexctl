@@ -16,6 +16,7 @@ import {
   pruneJobs,
   reconcileJobs,
   recoverJob,
+  runJob,
   runJobWorker,
   startJob,
   sweepJobs,
@@ -113,6 +114,23 @@ export async function main(argv: string[]): Promise<void> {
     const force = booleanFlag(args, "force");
     const detach = booleanFlag(args, "detach");
     await printJson(await startJob({ key: jobKey, repo, prompt, model, approvalPolicy, sandbox, force, detach }));
+    return;
+  }
+
+  if (resource === "job" && action === "run") {
+    allowFlags(args, ["json", "key", "repo", "prompt", "model", "approval-policy", "sandbox", "force", "events", "interval-ms", "timeout-ms"]);
+    await printJson(await runJob({
+      key: requiredString(args, "key"),
+      repo: stringFlag(args, "repo") ?? ".",
+      prompt: requiredString(args, "prompt"),
+      model: stringFlag(args, "model") ?? undefined,
+      approvalPolicy: approvalPolicyFlag(args),
+      sandbox: sandboxFlag(args),
+      force: booleanFlag(args, "force"),
+      eventLimit: eventLimitFlag(args),
+      intervalMs: intervalMsFlag(args),
+      timeoutMs: numberFlag(args, "timeout-ms"),
+    }));
     return;
   }
 
@@ -493,6 +511,7 @@ function usageText(): string {
   return `Usage:
   codexctl doctor --json
   codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
+  codexctl job run --repo . --key <key> --prompt <prompt> [--force] [--events <n>] [--timeout-ms <ms>] --json
   codexctl job list --json
   codexctl job status <key> --json
   codexctl job summary <key> [--events <n>] --json

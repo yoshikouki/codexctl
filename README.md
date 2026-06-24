@@ -7,6 +7,7 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl doctor --json` checks the local Codex app-server daemon.
 - `codexctl job start --repo . --key demo --prompt "..." --json` runs a Codex turn through `codex app-server --stdio`.
 - `codexctl job start --detach --repo . --key demo --prompt "..." --json` starts a detached worker.
+- `codexctl job run --repo . --key demo --prompt "..." --timeout-ms 600000 --json` starts a detached worker and waits for an actionable summary.
 - `codexctl job start --approval-policy untrusted ...` asks app-server to route more actions through approval.
 - `codexctl job start --sandbox read-only ...` overrides the app-server sandbox mode for that job.
 - `codexctl job list --json` summarizes local job records with next actions and worker health.
@@ -36,6 +37,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 `job summary` is the quickest post-run view for agents: it returns the current job record, `nextAction`, worker health, pending and actionable approvals, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. Use `--events 0` when the caller wants the stable summary fields without the event tail.
 
 `job wait` polls `job summary` and returns one JSON object instead of streaming events. It stops when the job reaches a terminal status or when `nextAction` becomes `resolve_approval`, so agents can either read the final result or handle an approval without replaying logs. `--timeout-ms <ms>` bounds the wait and returns `ready: false`, `reason: "timeout"`, and the current summary; timeout is a poll result, not a structured error.
+
+`job run` is the one-command orchestration path for agents. It creates or replaces a job using the same options as `job start --detach`, then runs the same wait logic as `job wait`. The response includes `started` for the spawned worker record and `wait` for the actionable summary result. It does not auto-approve requests; if the wait result is `reason: "approval_required"`, use the approval commands and then `job wait` again.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
 

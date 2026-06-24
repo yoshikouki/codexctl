@@ -76,6 +76,19 @@ describe("cli output contract", () => {
     });
   });
 
+  test("job run validates required prompt before spawning", async () => {
+    const result = await runCli(["job", "run", "--key=missing-prompt", "--timeout-ms", "1", "--json"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "usage_error",
+        message: "Missing required --prompt",
+      },
+    });
+  });
+
   test("--json parse errors stay structured", async () => {
     const result = await runCli(["--=x", "--json"]);
     expect(result.exitCode).toBe(2);
@@ -111,6 +124,19 @@ describe("cli output contract", () => {
       error: {
         code: "invalid_flag",
         message: "--format must be one of: raw, compact",
+      },
+    });
+  });
+
+  test("job run validates wait flags before spawning", async () => {
+    const result = await runCli(["job", "run", "--key=bad-wait", "--prompt", "hello", "--timeout-ms", "", "--json"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "invalid_flag",
+        message: "--timeout-ms must be a positive integer",
       },
     });
   });
@@ -930,6 +956,32 @@ describe("job control files", () => {
       await createJob({ key: "control-test", repo: ".", prompt: "hello again", force: true });
       const replacement = await Bun.file(".codexctl/jobs/control-test/job.json").json();
       expect(replacement.jobIncarnation).not.toBe(first.jobIncarnation);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("createJob force refuses to replace live workers", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "live-force-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/live-force-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = process.pid;
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      await expect(createJob({ key: "live-force-test", repo: ".", prompt: "replacement", force: true })).rejects.toThrow("cancel or wait before replacing it");
+      expect((await Bun.file(jobPath).json()).prompt).toBe("hello");
+
+      const cli = await runCli(["job", "run", "--key", "live-force-test", "--repo", ".", "--prompt", "replacement", "--force", "--timeout-ms", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(2);
+      expect(JSON.parse(cli.stderr).error).toMatchObject({
+        code: "job_worker_alive",
+      });
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
