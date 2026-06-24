@@ -66,6 +66,14 @@ If the manager requires a local path, point it at:
 skills/codexctl
 ```
 
+Observed behavior with `npx skills add` is copy-based for global installs, including local path installs:
+
+```sh
+npx skills add . --skill codexctl --global
+```
+
+This installs a copy under the manager's global skill directory rather than a live symlink to the working tree. Re-run the add/update command after editing the repository copy.
+
 Do not edit installed copies directly when the repository copy can be updated and reinstalled. This keeps `npx skills` and marketplace update mechanisms able to replace the skill cleanly.
 
 ## Packaging Notes
@@ -94,4 +102,3 @@ When `codexctl` behavior changes:
 3. Validate the skill folder.
 4. Commit and push the repository.
 5. Use the skill manager's update command to refresh installed copies.
-
