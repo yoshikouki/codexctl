@@ -124,7 +124,10 @@ export async function main(argv: string[]): Promise<void> {
     const job = await readJob(key);
     await printJson({
       key: job.key,
+      jobIncarnation: job.jobIncarnation,
       status: job.status,
+      workerId: job.workerId,
+      workerGeneration: job.workerGeneration,
       workerPid: job.workerPid,
       workerHeartbeatAt: job.workerHeartbeatAt,
       workerHealth: workerHealth(job),

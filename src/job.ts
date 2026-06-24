@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
+import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
 import { compactJobEvent, type CompactJobEvent } from "./events.ts";
@@ -15,8 +15,11 @@ export class JobOperationError extends Error {
   }
 }
 
+class StaleWorkerWriteError extends Error {}
+
 export type JobRecord = {
   key: string;
+  jobIncarnation: string | null;
   repo: string;
   prompt: string;
   model: string | null;
@@ -27,6 +30,8 @@ export type JobRecord = {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  workerId: string | null;
+  workerGeneration: number;
   workerPid: number | null;
   workerHeartbeatAt: string | null;
   threadId: string | null;
@@ -134,9 +139,12 @@ export type JobPruneStatus = "completed" | "failed" | "cancelled" | "terminal";
 
 export type JobListItem = {
   key: string;
+  jobIncarnation: string | null;
   status: JobStatus | "unreadable";
   nextAction: JobNextAction | null;
   updatedAt: string | null;
+  workerId: string | null;
+  workerGeneration: number | null;
   workerPid: number | null;
   workerHeartbeatAt: string | null;
   workerAlive: boolean | null;
@@ -153,6 +161,7 @@ export type JobNextAction = "wait" | "wait_cancel" | "resolve_approval" | "read_
 
 export type JobSummary = {
   key: string;
+  jobIncarnation: string | null;
   status: JobStatus;
   nextAction: JobNextAction;
   repo: string;
@@ -164,6 +173,8 @@ export type JobSummary = {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  workerId: string | null;
+  workerGeneration: number;
   workerPid: number | null;
   workerHealth: WorkerHealth;
   threadId: string | null;
@@ -208,6 +219,9 @@ export type JobSummaryDiagnostics = {
 
 const WORKER_HEARTBEAT_INTERVAL_MS = 1_000;
 const WORKER_HEARTBEAT_STALE_MS = 30_000;
+const JOB_RECORD_LOCK_STALE_MS = 30_000;
+const JOB_RECORD_LOCK_RETRY_MS = 25;
+const JOB_RECORD_LOCK_ATTEMPTS = 80;
 
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
@@ -240,26 +254,35 @@ export async function recoverJob(key: string, options: JobRecoveryOptions = {}):
     return { action: "restarted", reason: "worker died before starting a thread", job: await spawnDetachedWorker(record, dir, "recover") };
   }
 
-  record.status = "failed";
-  record.error = "worker process is not alive; in-flight app-server stdio sessions cannot be resumed";
-  record.completedAt = new Date().toISOString();
-  record.updatedAt = new Date().toISOString();
-  await writeJobRecord(dir, record);
-  await appendEvent(dir, {
-    direction: "worker",
-    event: { type: "recovery.failed", reason: "in_flight_stdio_session_not_resumable", workerPid: record.workerPid },
-    at: new Date().toISOString(),
+  return await withJobRecordLock(dir, key, async () => {
+    const current = await readPersistedJobRecord(dir, key);
+    if (jobRecoveryStateId(current) !== jobRecoveryStateId(record)) {
+      throw new JobOperationError("job_state_changed", `Job '${key}' changed before recovery failure could be applied`);
+    }
+    current.status = "failed";
+    current.error = "worker process is not alive; in-flight app-server stdio sessions cannot be resumed";
+    current.completedAt = new Date().toISOString();
+    current.updatedAt = new Date().toISOString();
+    await writeJobRecordUnlocked(dir, current);
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "recovery.failed", reason: "in_flight_stdio_session_not_resumable", workerPid: current.workerPid },
+      at: new Date().toISOString(),
+    });
+    return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: current };
   });
-  return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: record };
 }
 
 export function jobRecoveryStateId(job: {
+  jobIncarnation?: string | null;
   updatedAt: string | null;
+  workerId?: string | null;
+  workerGeneration?: number | null;
   workerPid: number | null;
   threadId: string | null;
   turnId: string | null;
 }): string {
-  return shortStableHash([job.updatedAt, job.workerPid, job.threadId, job.turnId].join("\u0000"));
+  return shortStableHash([job.jobIncarnation ?? null, job.updatedAt, job.workerId ?? null, job.workerGeneration ?? null, job.workerPid, job.threadId, job.turnId].join("\u0000"));
 }
 
 function shortStableHash(value: string): string {
@@ -283,9 +306,12 @@ export async function listJobs(): Promise<JobListItem[]> {
       } catch (error) {
         return {
           key: entry.name,
+          jobIncarnation: null,
           status: "unreadable",
           nextAction: null,
           updatedAt: null,
+          workerId: null,
+          workerGeneration: null,
           workerPid: null,
           workerHeartbeatAt: null,
           workerAlive: null,
@@ -374,142 +400,185 @@ export async function pruneJobs(options: JobPruneOptions = {}): Promise<JobPrune
 
 export async function cancelJob(key: string): Promise<JobCancelResult> {
   const dir = jobDir(process.cwd(), key);
-  const job = await readJob(key);
-  if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-    return { action: "none", reason: `job is already ${job.status}`, job, command: null };
-  }
-  if (job.status === "queued") {
-    const now = new Date().toISOString();
-    job.status = "cancelled";
-    job.error = null;
-    job.cancelRequestedAt = now;
-    job.completedAt = now;
-    job.updatedAt = now;
-    await writeJobRecord(dir, job);
-    await appendEvent(dir, {
-      direction: "worker",
-      event: { type: "job.cancelled", reason: "queued" },
-      at: now,
-    });
-    return { action: "cancelled", reason: "queued job cancelled before worker start", job, command: null };
-  }
-
-  if (job.cancelRequestedAt) {
-    return { action: "already_requested", reason: "turn interrupt command was already queued", job, command: null };
-  }
-
-  if (!isProcessAlive(job.workerPid)) {
-    const now = new Date().toISOString();
-    if (!job.threadId && !job.turnId) {
+  return await withJobRecordLock(dir, key, async () => {
+    const job = await readPersistedJobRecord(dir, key);
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+      return { action: "none", reason: `job is already ${job.status}`, job, command: null };
+    }
+    if (job.status === "queued") {
+      const now = new Date().toISOString();
       job.status = "cancelled";
       job.error = null;
       job.cancelRequestedAt = now;
       job.completedAt = now;
       job.updatedAt = now;
-      await writeJobRecord(dir, job);
+      await writeJobRecordUnlocked(dir, job);
       await appendEvent(dir, {
         direction: "worker",
-        event: { type: "job.cancelled", reason: "worker_not_alive_before_turn_start", workerPid: job.workerPid },
+        event: { type: "job.cancelled", reason: "queued" },
         at: now,
       });
-      return { action: "cancelled", reason: "worker was not alive before turn start", job, command: null };
+      return { action: "cancelled", reason: "queued job cancelled before worker start", job, command: null };
     }
 
-    job.status = "failed";
-    job.error = "worker process is not alive; in-flight app-server stdio sessions cannot be interrupted";
-    job.completedAt = now;
+    if (job.cancelRequestedAt) {
+      return { action: "already_requested", reason: "turn interrupt command was already queued", job, command: null };
+    }
+
+    if (!isProcessAlive(job.workerPid)) {
+      const now = new Date().toISOString();
+      if (!job.threadId && !job.turnId) {
+        job.status = "cancelled";
+        job.error = null;
+        job.cancelRequestedAt = now;
+        job.completedAt = now;
+        job.updatedAt = now;
+        await writeJobRecordUnlocked(dir, job);
+        await appendEvent(dir, {
+          direction: "worker",
+          event: { type: "job.cancelled", reason: "worker_not_alive_before_turn_start", workerPid: job.workerPid },
+          at: now,
+        });
+        return { action: "cancelled", reason: "worker was not alive before turn start", job, command: null };
+      }
+
+      job.status = "failed";
+      job.error = "worker process is not alive; in-flight app-server stdio sessions cannot be interrupted";
+      job.completedAt = now;
+      job.updatedAt = now;
+      await writeJobRecordUnlocked(dir, job);
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "cancel.failed", reason: "in_flight_stdio_session_not_interruptible", workerPid: job.workerPid },
+        at: now,
+      });
+      return { action: "failed", reason: "in-flight app-server stdio session cannot be interrupted", job, command: null };
+    }
+
+    const now = new Date().toISOString();
+    const command: TurnInterruptCommand = {
+      id: crypto.randomUUID(),
+      type: "turn.interrupt",
+      at: now,
+    };
+    job.cancelRequestedAt = now;
+    job.cancelCommandId = command.id;
     job.updatedAt = now;
-    await writeJobRecord(dir, job);
+    await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
     await appendEvent(dir, {
-      direction: "worker",
-      event: { type: "cancel.failed", reason: "in_flight_stdio_session_not_interruptible", workerPid: job.workerPid },
+      direction: "control",
+      command,
       at: now,
     });
-    return { action: "failed", reason: "in-flight app-server stdio session cannot be interrupted", job, command: null };
-  }
-
-  const now = new Date().toISOString();
-  const command: TurnInterruptCommand = {
-    id: crypto.randomUUID(),
-    type: "turn.interrupt",
-    at: now,
-  };
-  job.cancelRequestedAt = now;
-  job.cancelCommandId = command.id;
-  job.updatedAt = now;
-  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-  await appendEvent(dir, {
-    direction: "control",
-    command,
-    at: now,
+    await writeJobRecordUnlocked(dir, job);
+    return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
   });
-  await writeJobRecord(dir, job);
-  return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
 }
 
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
   const root = process.cwd();
   const dir = jobDir(root, options.key);
-  const existingJob = Bun.file(`${dir}/job.json`);
-  if ((await existingJob.exists()) && !options.force) {
-    throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
-  }
   await mkdir(dir, { recursive: true });
-  await Bun.write(`${dir}/events.jsonl`, "");
-  await Bun.write(`${dir}/control.jsonl`, "");
-  await Bun.write(`${dir}/worker.log`, "");
-  await Bun.write(`${dir}/worker.err.log`, "");
+  return await withJobRecordLock(dir, options.key, async () => {
+    const existingJob = Bun.file(`${dir}/job.json`);
+    if ((await existingJob.exists()) && !options.force) {
+      throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
+    }
+    await Bun.write(`${dir}/events.jsonl`, "");
+    await Bun.write(`${dir}/control.jsonl`, "");
+    await Bun.write(`${dir}/worker.log`, "");
+    await Bun.write(`${dir}/worker.err.log`, "");
 
-  const record: JobRecord = {
-    key: options.key,
-    repo,
-    prompt: options.prompt,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "on-request",
-    sandbox: options.sandbox ?? null,
-    status: "queued",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    startedAt: null,
-    completedAt: null,
-    workerPid: null,
-    workerHeartbeatAt: null,
-    threadId: null,
-    turnId: null,
-    cancelRequestedAt: null,
-    cancelCommandId: null,
-    approvals: [],
-    finalResponse: "",
-    error: null,
-  };
-  await writeJobRecord(dir, record);
-  return record;
+    const record: JobRecord = {
+      key: options.key,
+      jobIncarnation: crypto.randomUUID(),
+      repo,
+      prompt: options.prompt,
+      model: options.model ?? null,
+      approvalPolicy: options.approvalPolicy ?? "on-request",
+      sandbox: options.sandbox ?? null,
+      status: "queued",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      workerId: null,
+      workerGeneration: 0,
+      workerPid: null,
+      workerHeartbeatAt: null,
+      threadId: null,
+      turnId: null,
+      cancelRequestedAt: null,
+      cancelCommandId: null,
+      approvals: [],
+      finalResponse: "",
+      error: null,
+    };
+    await writeJobRecordUnlocked(dir, record);
+    return record;
+  });
 }
 
 async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "start" | "recover"): Promise<JobRecord> {
-  const proc = Bun.spawn({
-    cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", record.key],
-    cwd: process.cwd(),
-    stdin: "ignore",
-    stdout: Bun.file(`${dir}/worker.log`),
-    stderr: Bun.file(`${dir}/worker.err.log`),
-    detached: true,
+  return await withJobRecordLock(dir, record.key, async () => {
+    const current = await readPersistedJobRecord(dir, record.key);
+    if (jobRecoveryStateId(current) !== jobRecoveryStateId(record)) {
+      throw new JobOperationError("job_state_changed", `Job '${record.key}' changed before worker spawn could be applied`);
+    }
+    const workerId = crypto.randomUUID();
+    const workerGeneration = current.workerGeneration + 1;
+    current.status = "running";
+    current.workerId = workerId;
+    current.workerGeneration = workerGeneration;
+    current.workerPid = null;
+    current.workerHeartbeatAt = new Date().toISOString();
+    current.completedAt = null;
+    current.updatedAt = new Date().toISOString();
+    await writeJobRecordUnlocked(dir, current);
+
+    let proc: ReturnType<typeof Bun.spawn>;
+    try {
+      proc = Bun.spawn({
+        cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", current.key],
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          CODEXCTL_WORKER_ID: workerId,
+          CODEXCTL_WORKER_GENERATION: String(workerGeneration),
+        },
+        stdin: "ignore",
+        stdout: Bun.file(`${dir}/worker.log`),
+        stderr: Bun.file(`${dir}/worker.err.log`),
+        detached: true,
+      });
+    } catch (error) {
+      current.status = "failed";
+      current.workerPid = null;
+      current.error = error instanceof Error ? error.message : String(error);
+      current.completedAt = new Date().toISOString();
+      current.updatedAt = new Date().toISOString();
+      await writeJobRecordUnlocked(dir, current);
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "worker.spawn_failed", workerId, workerGeneration, reason, error: current.error },
+        at: new Date().toISOString(),
+      });
+      throw error;
+    }
+    proc.unref();
+    current.workerPid = proc.pid;
+    current.workerHeartbeatAt = new Date().toISOString();
+    current.updatedAt = new Date().toISOString();
+    await writeJobRecordUnlocked(dir, current);
+    await writeWorkerHeartbeatUnlocked(dir, current);
+    await appendEvent(dir, {
+      direction: "worker",
+      event: { type: "worker.spawned", pid: proc.pid, workerId, workerGeneration, reason },
+      at: new Date().toISOString(),
+    });
+    return current;
   });
-  proc.unref();
-  record.status = "running";
-  record.workerPid = proc.pid;
-  record.workerHeartbeatAt = new Date().toISOString();
-  record.completedAt = null;
-  record.updatedAt = new Date().toISOString();
-  await writeJobRecord(dir, record);
-  await writeWorkerHeartbeat(dir, record);
-  await appendEvent(dir, {
-    direction: "worker",
-    event: { type: "worker.spawned", pid: proc.pid, reason },
-    at: new Date().toISOString(),
-  });
-  return record;
 }
 
 export async function runJobWorker(key: string): Promise<JobRecord> {
@@ -518,13 +587,19 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   record.status = "running";
   record.startedAt ??= new Date().toISOString();
   record.updatedAt = new Date().toISOString();
+  const envWorkerId = process.env.CODEXCTL_WORKER_ID;
+  if (envWorkerId) record.workerId = envWorkerId;
+  else if (!record.workerId) record.workerId = crypto.randomUUID();
+  const envGeneration = Number(process.env.CODEXCTL_WORKER_GENERATION);
+  if (Number.isInteger(envGeneration) && envGeneration > 0) record.workerGeneration = envGeneration;
+  else if (record.workerGeneration <= 0) record.workerGeneration = 1;
   record.workerPid ??= process.pid;
   record.workerHeartbeatAt = new Date().toISOString();
   await writeWorkerJobRecord(dir, record);
   await writeWorkerHeartbeat(dir, record);
   await appendEvent(dir, {
     direction: "worker",
-    event: { type: "worker.started", pid: process.pid },
+    event: { type: "worker.started", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration },
     at: new Date().toISOString(),
   });
 
@@ -577,11 +652,31 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     ]);
     return record;
   } catch (error) {
+    if (error instanceof StaleWorkerWriteError) {
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "worker.stale", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration, error: error.message },
+        at: new Date().toISOString(),
+      });
+      throw error;
+    }
     record.status = "failed";
     record.error = error instanceof Error ? error.message : String(error);
     record.completedAt = new Date().toISOString();
     record.updatedAt = new Date().toISOString();
-    await writeWorkerJobRecord(dir, record);
+    try {
+      await writeWorkerJobRecord(dir, record);
+    } catch (writeError) {
+      if (writeError instanceof StaleWorkerWriteError) {
+        await appendEvent(dir, {
+          direction: "worker",
+          event: { type: "worker.stale", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration, error: writeError.message },
+          at: new Date().toISOString(),
+        });
+      } else {
+        throw writeError;
+      }
+    }
     throw error;
   } finally {
     clearInterval(heartbeatTimer);
@@ -619,6 +714,7 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
   const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
   return {
     key: job.key,
+    jobIncarnation: job.jobIncarnation,
     status: job.status,
     nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     repo: job.repo,
@@ -630,6 +726,8 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     updatedAt: job.updatedAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
+    workerId: job.workerId,
+    workerGeneration: job.workerGeneration,
     workerPid: job.workerPid,
     workerHealth: workerHealth(job),
     threadId: job.threadId,
@@ -1027,12 +1125,113 @@ async function readNewCompleteLines(path: string, offset: number): Promise<{ lin
 
 async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
   await mkdir(dirname(`${dir}/job.json`), { recursive: true });
+  await withJobRecordLock(dir, record.key, async () => {
+    await writeJobRecordUnlocked(dir, record);
+  });
+}
+
+async function writeJobRecordUnlocked(dir: string, record: JobRecord): Promise<void> {
   await Bun.write(`${dir}/job.json`, JSON.stringify(record, null, 2) + "\n");
 }
 
 async function writeWorkerJobRecord(dir: string, record: JobRecord): Promise<void> {
-  await mergePersistedControlFields(dir, record);
-  await writeJobRecord(dir, record);
+  await withJobRecordLock(dir, record.key, async () => {
+    await assertCurrentWorkerRecordUnlocked(dir, record);
+    await mergePersistedControlFields(dir, record);
+    await assertCurrentWorkerRecordUnlocked(dir, record);
+    await writeJobRecordUnlocked(dir, record);
+  });
+}
+
+async function assertCurrentWorkerRecordUnlocked(dir: string, record: JobRecord): Promise<void> {
+  let latest: JobRecord;
+  try {
+    latest = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), record.key);
+  } catch (error) {
+    if (isErrorWithCode(error) && error.code === "ENOENT") {
+      throw new StaleWorkerWriteError(`job record for '${record.key}' no longer exists`);
+    }
+    throw error;
+  }
+  if (latest.workerId !== null && record.workerId !== null && latest.workerId !== record.workerId) {
+    throw new StaleWorkerWriteError(`worker ${record.workerId} is stale; current worker is ${latest.workerId}`);
+  }
+  if (latest.jobIncarnation !== null && latest.jobIncarnation !== record.jobIncarnation) {
+    throw new StaleWorkerWriteError(`job incarnation ${record.jobIncarnation ?? "legacy"} is stale; current incarnation is ${latest.jobIncarnation}`);
+  }
+  if (latest.workerGeneration > 0 && record.workerGeneration > 0 && latest.workerGeneration !== record.workerGeneration) {
+    throw new StaleWorkerWriteError(`worker generation ${record.workerGeneration} is stale; current generation is ${latest.workerGeneration}`);
+  }
+}
+
+async function withJobRecordLock<T>(dir: string, key: string, work: () => Promise<T>): Promise<T> {
+  const lockDir = `${dir}/job.lock`;
+  for (let attempt = 0; attempt < JOB_RECORD_LOCK_ATTEMPTS; attempt++) {
+    const ownerToken = crypto.randomUUID();
+    try {
+      await mkdir(lockDir);
+      await Bun.write(`${lockDir}/owner.json`, JSON.stringify({
+        token: ownerToken,
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      }, null, 2) + "\n");
+      try {
+        return await work();
+      } finally {
+        await rm(lockDir, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
+      if (await breakStaleJobRecordLock(lockDir)) continue;
+      await sleep(JOB_RECORD_LOCK_RETRY_MS);
+    }
+  }
+  throw new JobOperationError("job_state_changed", `Job '${key}' job record is locked by another writer`);
+}
+
+async function breakStaleJobRecordLock(lockDir: string): Promise<boolean> {
+  try {
+    const ownerText = await Bun.file(`${lockDir}/owner.json`).text();
+    const owner = JSON.parse(ownerText) as unknown;
+    if (!isObject(owner)) return await breakStaleJobRecordLockByMtime(lockDir, ownerText);
+    const pid = typeof owner.pid === "number" ? owner.pid : null;
+    const createdAt = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : Number.NaN;
+    const age = Number.isFinite(createdAt) ? Date.now() - createdAt : Number.POSITIVE_INFINITY;
+    if ((pid !== null && !isProcessAlive(pid)) || age > JOB_RECORD_LOCK_STALE_MS) {
+      if (!await jobRecordLockOwnerStillMatches(lockDir, ownerText)) return false;
+      await rm(lockDir, { recursive: true, force: true });
+      return true;
+    }
+  } catch {
+    return await breakStaleJobRecordLockByMtime(lockDir, null);
+  }
+  return false;
+}
+
+async function breakStaleJobRecordLockByMtime(lockDir: string, expectedOwnerText: string | null): Promise<boolean> {
+  try {
+    const info = await stat(lockDir);
+    if (Date.now() - info.mtimeMs > JOB_RECORD_LOCK_STALE_MS) {
+      if (expectedOwnerText !== null && !await jobRecordLockOwnerStillMatches(lockDir, expectedOwnerText)) return false;
+      await rm(lockDir, { recursive: true, force: true });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+async function jobRecordLockOwnerStillMatches(lockDir: string, expectedOwnerText: string): Promise<boolean> {
+  try {
+    return await Bun.file(`${lockDir}/owner.json`).text() === expectedOwnerText;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function mergePersistedControlFields(dir: string, record: JobRecord): Promise<void> {
@@ -1054,7 +1253,17 @@ async function refreshWorkerHeartbeat(record: JobRecord, dir: string): Promise<v
 }
 
 async function writeWorkerHeartbeat(dir: string, record: JobRecord): Promise<void> {
+  await withJobRecordLock(dir, record.key, async () => {
+    await assertCurrentWorkerRecordUnlocked(dir, record);
+    await writeWorkerHeartbeatUnlocked(dir, record);
+  });
+}
+
+async function writeWorkerHeartbeatUnlocked(dir: string, record: JobRecord): Promise<void> {
   await Bun.write(`${dir}/worker-heartbeat.json`, JSON.stringify({
+    jobIncarnation: record.jobIncarnation,
+    workerId: record.workerId,
+    workerGeneration: record.workerGeneration,
     workerPid: record.workerPid,
     workerHeartbeatAt: record.workerHeartbeatAt,
   }, null, 2) + "\n");
@@ -1090,12 +1299,36 @@ async function overlayWorkerHeartbeat(record: JobRecord, dir: string): Promise<J
   try {
     const heartbeat = await file.json();
     if (isObject(heartbeat) && typeof heartbeat.workerHeartbeatAt === "string") {
+      if (!heartbeatMatchesCurrentWorker(heartbeat, record)) return record;
       record.workerHeartbeatAt = heartbeat.workerHeartbeatAt;
     }
   } catch {
     return record;
   }
   return record;
+}
+
+function heartbeatMatchesCurrentWorker(heartbeat: Record<string, unknown>, record: JobRecord): boolean {
+  if (record.jobIncarnation !== null && heartbeat.jobIncarnation !== record.jobIncarnation) {
+    return false;
+  }
+  if (record.workerId !== null && typeof heartbeat.workerId !== "string") {
+    return false;
+  }
+  if (typeof heartbeat.workerId === "string" && record.workerId !== null && heartbeat.workerId !== record.workerId) {
+    return false;
+  }
+  if (record.workerGeneration > 0 && typeof heartbeat.workerGeneration !== "number") {
+    return false;
+  }
+  if (
+    typeof heartbeat.workerGeneration === "number"
+    && record.workerGeneration > 0
+    && heartbeat.workerGeneration !== record.workerGeneration
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function summarizeJob(job: JobRecord): JobListItem {
@@ -1105,9 +1338,12 @@ function summarizeJob(job: JobRecord): JobListItem {
   const health = workerHealth(job);
   return {
     key: job.key,
+    jobIncarnation: job.jobIncarnation,
     status: job.status,
     nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     updatedAt: job.updatedAt,
+    workerId: job.workerId,
+    workerGeneration: job.workerGeneration,
     workerPid: job.workerPid,
     workerHeartbeatAt: job.workerHeartbeatAt,
     workerAlive: health.alive,
@@ -1214,6 +1450,7 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     : "failed";
   return {
     key: typeof value.key === "string" ? value.key : fallbackKey,
+    jobIncarnation: typeof value.jobIncarnation === "string" ? value.jobIncarnation : null,
     repo: typeof value.repo === "string" ? value.repo : process.cwd(),
     prompt: typeof value.prompt === "string" ? value.prompt : "",
     model: typeof value.model === "string" ? value.model : null,
@@ -1224,6 +1461,10 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : now,
     startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
     completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
+    workerId: typeof value.workerId === "string" ? value.workerId : null,
+    workerGeneration: typeof value.workerGeneration === "number" && Number.isInteger(value.workerGeneration) && value.workerGeneration >= 0
+      ? value.workerGeneration
+      : 0,
     workerPid: typeof value.workerPid === "number" ? value.workerPid : null,
     workerHeartbeatAt: typeof value.workerHeartbeatAt === "string" ? value.workerHeartbeatAt : null,
     threadId: typeof value.threadId === "string" ? value.threadId : null,

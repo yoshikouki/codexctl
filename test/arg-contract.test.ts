@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
@@ -10,6 +10,7 @@ import {
   createJob,
   enqueueApprovalDecision,
   enqueueSteer,
+  jobRecoveryStateId,
   listJobs,
   readApprovals,
   readJobEvents,
@@ -457,11 +458,16 @@ describe("event store", () => {
       const jobPath = ".codexctl/jobs/status-health-test/job.json";
       const job = await Bun.file(jobPath).json();
       job.status = "running";
+      job.workerId = "worker-current";
+      job.workerGeneration = 2;
       job.workerPid = process.pid;
       job.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
       await Bun.write(jobPath, JSON.stringify(job));
       const freshHeartbeat = new Date().toISOString();
       await Bun.write(".codexctl/jobs/status-health-test/worker-heartbeat.json", JSON.stringify({
+        jobIncarnation: job.jobIncarnation,
+        workerId: "worker-current",
+        workerGeneration: 2,
         workerPid: process.pid,
         workerHeartbeatAt: freshHeartbeat,
       }));
@@ -470,10 +476,85 @@ describe("event store", () => {
       const status = await runCli(["job", "status", "status-health-test", "--json"], tmp);
       expect(status.exitCode).toBe(0);
       const body = JSON.parse(status.stdout);
+      expect(typeof body.jobIncarnation).toBe("string");
       expect(body.workerHeartbeatAt).toBe(freshHeartbeat);
+      expect(body.workerId).toBe("worker-current");
+      expect(body.workerGeneration).toBe(2);
       expect(body.workerHealth.heartbeatAt).toBe(freshHeartbeat);
       expect(body.workerHealth.alive).toBe(true);
       expect(body.workerHealth.reason).toBe("alive_recent");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job status ignores stale heartbeat files from older worker generations", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "stale-heartbeat-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/stale-heartbeat-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerId = "worker-current";
+      job.workerGeneration = 2;
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const staleHeartbeat = new Date().toISOString();
+      await Bun.write(".codexctl/jobs/stale-heartbeat-test/worker-heartbeat.json", JSON.stringify({
+        workerId: "worker-previous",
+        workerGeneration: 1,
+        workerPid: process.pid,
+        workerHeartbeatAt: staleHeartbeat,
+      }));
+
+      const status = await runCli(["job", "status", "stale-heartbeat-test", "--json"], tmp);
+      expect(status.exitCode).toBe(0);
+      const body = JSON.parse(status.stdout);
+      expect(body.workerId).toBe("worker-current");
+      expect(body.workerGeneration).toBe(2);
+      expect(body.workerHeartbeatAt).toBe("1970-01-01T00:00:00.000Z");
+      expect(body.workerHealth.heartbeatAt).toBe("1970-01-01T00:00:00.000Z");
+      expect(body.workerHealth.reason).toBe("alive_stale");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job status ignores legacy heartbeat files after worker identity exists", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "legacy-heartbeat-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/legacy-heartbeat-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerId = "worker-current";
+      job.workerGeneration = 2;
+      job.workerPid = process.pid;
+      job.workerHeartbeatAt = "1970-01-01T00:00:00.000Z";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const legacyHeartbeat = new Date().toISOString();
+      await Bun.write(".codexctl/jobs/legacy-heartbeat-test/worker-heartbeat.json", JSON.stringify({
+        workerPid: process.pid,
+        workerHeartbeatAt: legacyHeartbeat,
+      }));
+
+      const status = await runCli(["job", "status", "legacy-heartbeat-test", "--json"], tmp);
+      expect(status.exitCode).toBe(0);
+      const body = JSON.parse(status.stdout);
+      expect(body.workerId).toBe("worker-current");
+      expect(body.workerGeneration).toBe(2);
+      expect(body.workerHeartbeatAt).toBe("1970-01-01T00:00:00.000Z");
+      expect(body.workerHealth.heartbeatAt).toBe("1970-01-01T00:00:00.000Z");
+      expect(body.workerHealth.reason).toBe("alive_stale");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -751,6 +832,49 @@ describe("job control files", () => {
         key: "control-test",
         status: "queued",
       });
+      const first = await Bun.file(".codexctl/jobs/control-test/job.json").json();
+      expect(typeof first.jobIncarnation).toBe("string");
+      await createJob({ key: "control-test", repo: ".", prompt: "hello again", force: true });
+      const replacement = await Bun.file(".codexctl/jobs/control-test/job.json").json();
+      expect(replacement.jobIncarnation).not.toBe(first.jobIncarnation);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("createJob breaks stale job record locks", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await mkdir(".codexctl/jobs/lock-test/job.lock", { recursive: true });
+      await Bun.write(".codexctl/jobs/lock-test/job.lock/owner.json", JSON.stringify({
+        pid: 999_999_999,
+        createdAt: new Date().toISOString(),
+      }));
+      await createJob({ key: "lock-test", repo: ".", prompt: "hello" });
+      expect(await Bun.file(".codexctl/jobs/lock-test/job.lock").exists()).toBe(false);
+      expect((await Bun.file(".codexctl/jobs/lock-test/job.json").json()).key).toBe("lock-test");
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("createJob breaks stale job record locks with invalid owner metadata", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      const lockDir = ".codexctl/jobs/invalid-lock-test/job.lock";
+      await mkdir(lockDir, { recursive: true });
+      await Bun.write(`${lockDir}/owner.json`, "null");
+      const staleTime = new Date(Date.now() - 31_000);
+      await utimes(lockDir, staleTime, staleTime);
+      await createJob({ key: "invalid-lock-test", repo: ".", prompt: "hello" });
+      expect(await Bun.file(lockDir).exists()).toBe(false);
+      expect((await Bun.file(".codexctl/jobs/invalid-lock-test/job.json").json()).key).toBe("invalid-lock-test");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -817,6 +941,21 @@ describe("job control files", () => {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+
+  test("jobRecoveryStateId changes with worker identity", () => {
+    const base = {
+      jobIncarnation: "job-a",
+      updatedAt: "2026-06-24T00:00:00.000Z",
+      workerId: "worker-a",
+      workerGeneration: 1,
+      workerPid: 123,
+      threadId: "thread-1",
+      turnId: "turn-1",
+    };
+    expect(jobRecoveryStateId({ ...base, jobIncarnation: "job-b" })).not.toBe(jobRecoveryStateId(base));
+    expect(jobRecoveryStateId({ ...base, workerId: "worker-b" })).not.toBe(jobRecoveryStateId(base));
+    expect(jobRecoveryStateId({ ...base, workerGeneration: 2 })).not.toBe(jobRecoveryStateId(base));
   });
 
   test("listJobs summarizes jobs and sweepJobs recovers active jobs", async () => {
