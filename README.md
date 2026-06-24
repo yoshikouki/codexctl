@@ -2,6 +2,19 @@
 
 Agent-oriented CLI for controlling Codex app-server jobs.
 
+## Agent Skill
+
+This repository includes an Agent Skill at [`skills/codexctl/`](skills/codexctl/) so other AI agents can discover `codexctl` when a user asks to delegate work to another Codex/app-server job.
+
+Install or update it with your skill manager rather than copying installed files by hand:
+
+```sh
+npx skills add yoshikouki/codexctl --skill codexctl
+npx skills update codexctl
+```
+
+The skill intentionally stays thin. Use `codexctl --help` and [`docs/codexctl-agent-contract.md`](docs/codexctl-agent-contract.md) as command truth sources.
+
 This repository starts with a small Bun-based proof of concept. Non-help public commands require `--json` so agent callers can depend on a stable output mode:
 
 - `codexctl doctor --json` checks the local Codex app-server daemon.

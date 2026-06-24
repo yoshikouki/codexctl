@@ -1,0 +1,4 @@
+interface:
+  display_name: "codexctl"
+  short_description: "Delegate Codex jobs through codexctl"
+  default_prompt: "Use $codexctl to delegate work to another Codex job and monitor the result."
