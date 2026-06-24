@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { readDaemonVersion } from "./app-server.ts";
+import { compactJobEvent } from "./events.ts";
 import {
   enqueueApprovalDecision,
   enqueueSteer,
@@ -37,6 +38,7 @@ const knownPublicFlags = [
   "cancel",
   "detach",
   "for-session",
+  "format",
   "force",
   "help",
   "interval-ms",
@@ -116,16 +118,23 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "events" && key) {
-    allowFlags(args, ["json"]);
+    allowFlags(args, ["json", "format"]);
+    const format = eventFormatFlag(args);
     for (const event of await readJobEvents(key)) {
-      console.log(JSON.stringify(event));
+      if (format === "raw") {
+        console.log(JSON.stringify(event));
+      } else {
+        for (const compact of compactJobEvent(event)) {
+          console.log(JSON.stringify(compact));
+        }
+      }
     }
     return;
   }
 
   if (resource === "job" && action === "watch" && key) {
-    allowFlags(args, ["json"]);
-    await watchJob(key);
+    allowFlags(args, ["json", "format"]);
+    await watchJob(key, eventFormatFlag(args));
     return;
   }
 
@@ -280,6 +289,13 @@ function sandboxFlag(args: Args): "read-only" | "workspace-write" | "danger-full
   throw new CliError("invalid_flag", "--sandbox must be one of: read-only, workspace-write, danger-full-access");
 }
 
+function eventFormatFlag(args: Args): "raw" | "compact" {
+  const value = stringFlag(args, "format");
+  if (value === null) return "raw";
+  if (value === "raw" || value === "compact") return value;
+  throw new CliError("invalid_flag", "--format must be one of: raw, compact");
+}
+
 function intervalMsFlag(args: Args): number {
   return numberFlag(args, "interval-ms") ?? 1000;
 }
@@ -314,8 +330,8 @@ function usageText(): string {
   codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
   codexctl job list --json
   codexctl job status <key> --json
-  codexctl job events <key> --json
-  codexctl job watch <key> --json
+  codexctl job events <key> [--format raw|compact] --json
+  codexctl job watch <key> [--format raw|compact] --json
   codexctl job steer <key> --prompt <prompt> --json
   codexctl job recover <key> --json
   codexctl job sweep --json
@@ -330,13 +346,19 @@ function usageText(): string {
   codexctl job result <key> --json`;
 }
 
-async function watchJob(key: string): Promise<void> {
+async function watchJob(key: string, format: "raw" | "compact"): Promise<void> {
   let offset = 0;
   while (true) {
     const next = await readNewEventLines(key, offset);
     offset = next.offset;
     for (const line of next.lines) {
-      console.log(line);
+      if (format === "raw") {
+        console.log(line);
+      } else {
+        for (const event of compactJobEvent(JSON.parse(line) as unknown)) {
+          console.log(JSON.stringify(event));
+        }
+      }
     }
     const job = await readJob(key);
     if (job.status === "completed" || job.status === "failed") {

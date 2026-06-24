@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
+import { compactJobEvent } from "../src/events.ts";
 import {
   approvalResponseFor,
   createJob,
@@ -86,6 +87,19 @@ describe("cli output contract", () => {
     });
   });
 
+  test("invalid event format is rejected", async () => {
+    const result = await runCli(["job", "events", "missing-test-job", "--format", "tiny", "--json"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "invalid_flag",
+        message: "--format must be one of: raw, compact",
+      },
+    });
+  });
+
   test("help is human-readable without --json", async () => {
     const result = await runCli(["--help"]);
     expect(result.exitCode).toBe(0);
@@ -98,6 +112,157 @@ describe("cli output contract", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(JSON.parse(result.stdout).usage).toContain("codexctl job start");
+  });
+});
+
+describe("compact job events", () => {
+  test("summarizes important app-server lifecycle events", () => {
+    expect(compactJobEvent({
+      direction: "server",
+      message: {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "completed" },
+        },
+      },
+      at: "2026-06-24T00:00:00.000Z",
+    })).toEqual([{
+      type: "turn.completed",
+      at: "2026-06-24T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      status: "completed",
+      error: null,
+    }]);
+
+    expect(compactJobEvent({
+      direction: "server",
+      message: {
+        method: "item/completed",
+        params: {
+          item: {
+            type: "agentMessage",
+            id: "msg-1",
+            phase: "final_answer",
+            text: "ok",
+          },
+        },
+      },
+      at: "2026-06-24T00:00:01.000Z",
+    })).toEqual([{
+      type: "agent_message.completed",
+      at: "2026-06-24T00:00:01.000Z",
+      itemId: "msg-1",
+      phase: "final_answer",
+      text: "ok",
+      threadId: null,
+      turnId: null,
+    }]);
+  });
+
+  test("preserves app-server errors", () => {
+    expect(compactJobEvent({
+      direction: "server",
+      message: {
+        id: 7,
+        error: { code: -32000, message: "boom", data: { detail: true } },
+      },
+      at: "2026-06-24T00:00:00.000Z",
+    })).toEqual([{
+      type: "app_server.error",
+      at: "2026-06-24T00:00:00.000Z",
+      requestId: 7,
+      code: -32000,
+      message: "boom",
+      data: { detail: true },
+      params: null,
+      threadId: null,
+      turnId: null,
+    }]);
+
+    expect(compactJobEvent({
+      direction: "server",
+      message: {
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          message: "turn exploded",
+        },
+      },
+      at: "2026-06-24T00:00:01.000Z",
+    })).toEqual([{
+      type: "app_server.error",
+      at: "2026-06-24T00:00:01.000Z",
+      requestId: null,
+      code: null,
+      message: "turn exploded",
+      data: null,
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        message: "turn exploded",
+      },
+      threadId: "thread-1",
+      turnId: "turn-1",
+    }]);
+  });
+
+  test("filters noisy app-server deltas", () => {
+    expect(compactJobEvent({
+      direction: "server",
+      message: {
+        method: "item/reasoning/summaryTextDelta",
+        params: { delta: "thinking" },
+      },
+      at: "2026-06-24T00:00:00.000Z",
+    })).toEqual([]);
+  });
+
+  test("job events can be emitted as compact JSONL", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "compact-events", repo: ".", prompt: "hello" });
+      await Bun.write(".codexctl/jobs/compact-events/events.jsonl", [
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "item/agentMessage/delta",
+            params: { delta: "ignore me" },
+          },
+          at: "2026-06-24T00:00:00.000Z",
+        }),
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed" },
+            },
+          },
+          at: "2026-06-24T00:00:01.000Z",
+        }),
+        "",
+      ].join("\n"));
+      const result = await runCli(["job", "events", "compact-events", "--format", "compact", "--json"], tmp);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout.trim().split("\n").map((line) => JSON.parse(line))).toEqual([{
+        type: "turn.completed",
+        at: "2026-06-24T00:00:01.000Z",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        status: "completed",
+        error: null,
+      }]);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 

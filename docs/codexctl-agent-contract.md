@@ -32,8 +32,8 @@ codexctl job start --detach --repo . --key demo --prompt "Respond exactly: ok" -
 codexctl job start --detach --approval-policy untrusted --sandbox read-only --repo . --key demo --prompt "Run pwd" --json
 codexctl job list --json
 codexctl job status demo --json
-codexctl job events demo --json
-codexctl job watch demo --json
+codexctl job events demo --format compact --json
+codexctl job watch demo --format compact --json
 codexctl job steer demo --prompt "Narrow the answer." --json
 codexctl job recover demo --json
 codexctl job sweep --json
@@ -73,6 +73,8 @@ Known error codes are `usage_error`, `invalid_flag`, `missing_json_flag`, and `i
 `job list` summarizes local job records. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. `--max-ticks` is available for tests and bounded dogfood runs.
+
+`job events` and `job watch` support `--format raw` and `--format compact`. Raw mode emits the persisted app-server event log exactly as JSON Lines. Compact mode emits only agent-useful lifecycle events: worker/control events, thread and turn starts, approval requests, command starts/completions, failed MCP startup notifications, warnings, app-server errors, completed assistant messages, and turn completions. Server-derived compact events include thread/turn identifiers when app-server provides them. Compact mode filters streaming token deltas and reasoning deltas.
 
 Job keys are restricted to letters, numbers, `.`, `_`, and `-`. Existing local job records are not overwritten unless callers pass `--force`.
 

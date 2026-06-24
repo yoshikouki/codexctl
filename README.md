@@ -10,7 +10,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl job start --approval-policy untrusted ...` asks app-server to route more actions through approval.
 - `codexctl job start --sandbox read-only ...` overrides the app-server sandbox mode for that job.
 - `codexctl job list --json` summarizes local job records.
-- `codexctl job watch demo --json` follows the event log until the job is terminal.
+- `codexctl job watch demo --format compact --json` follows a compact lifecycle stream until the job is terminal.
+- `codexctl job watch demo --format raw --json` follows the raw persisted app-server event log.
 - `codexctl job steer demo --prompt "..." --json` appends a steering command for the worker.
 - `codexctl job recover demo --json` reconciles a queued or stale running job.
 - `codexctl job sweep --json` reconciles all queued or running local jobs.
@@ -19,6 +20,8 @@ This repository starts with a small Bun-based proof of concept. Non-help public 
 - `codexctl supervisor run --interval-ms 1000 --json` keeps sweeping queued or running jobs.
 - `codexctl job result demo --json` reads the persisted result.
 - `codexctl job events demo --json` streams the persisted event log.
+
+`job events` and `job watch` default to `--format raw` for full-fidelity replay. Use `--format compact` when an agent or human only needs lifecycle events such as thread/turn start, command execution, approval requests, warnings, app-server errors, completed assistant messages, and turn completion.
 
 The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `.codexctl/jobs/`. Existing job records are preserved unless `--force` is passed.
 
