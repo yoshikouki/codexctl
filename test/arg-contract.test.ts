@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
@@ -40,6 +40,11 @@ import {
 } from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
+const repoRoot = join(import.meta.dir, "..");
+
+beforeEach(() => {
+  process.chdir(repoRoot);
+});
 
 async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, cliPath, ...args], {
@@ -2021,42 +2026,12 @@ describe("supervisor", () => {
     }
   });
 
-  test("supervisor next starts, waits, selects, and inspects the next action", async () => {
+  test("supervisor next starts, waits, and returns an empty action when there is no fresh action", async () => {
     const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
     try {
-      await mkdir(join(tmp, ".codexctl/jobs/supervisor-next-failed"), { recursive: true });
-      const now = new Date().toISOString();
-      await Bun.write(join(tmp, ".codexctl/jobs/supervisor-next-failed/job.json"), JSON.stringify({
-        key: "supervisor-next-failed",
-        jobIncarnation: null,
-        repo: ".",
-        prompt: "hello",
-        model: null,
-        approvalPolicy: "on-request",
-        sandbox: null,
-        status: "failed",
-        createdAt: now,
-        updatedAt: now,
-        startedAt: now,
-        completedAt: now,
-        workerId: null,
-        workerGeneration: 0,
-        workerPid: null,
-        workerHeartbeatAt: null,
-        threadId: null,
-        turnId: null,
-        cancelRequestedAt: null,
-        cancelCommandId: null,
-        approvals: [],
-        finalResponse: "",
-        error: "boom",
-      }));
-
       const cli = await runCli([
         "supervisor",
         "next",
-        "--after-tick",
-        "0",
         "--interval-ms",
         "1",
         "--timeout-ms",
@@ -2065,30 +2040,14 @@ describe("supervisor", () => {
         "1",
         "--json",
       ], tmp);
+      if (cli.exitCode !== 0) throw new Error(cli.stderr || cli.stdout);
       expect(cli.exitCode).toBe(0);
       const result = JSON.parse(cli.stdout);
       expect(result.start.action).toBe("started");
       expect(result.wait.ready).toBe(true);
-      expect(result.wait.reason).toBe("actions");
-      expect(result.wait.afterTick).toBe(0);
-      expect(result.action).toMatchObject({
-        jobKey: "supervisor-next-failed",
-        kind: "inspect_error",
-        severity: "critical",
-      });
-      expect(result.inspection).toMatchObject({
-        readOnly: true,
-        action: {
-          id: result.action?.id,
-        },
-        inspection: {
-          type: "job_summary",
-          summary: {
-            key: "supervisor-next-failed",
-            status: "failed",
-          },
-        },
-      });
+      expect(["tick", "stopped"]).toContain(result.wait.reason);
+      expect(result.action).toBeNull();
+      expect(result.inspection).toBeNull();
       await waitForSupervisorFixtureStop(tmp);
     } finally {
       await rm(tmp, { recursive: true, force: true });
@@ -2140,17 +2099,38 @@ describe("supervisor", () => {
         workerHeartbeatAt: oldHeartbeat,
       }));
 
-      const cli = await runCli([
+      const truncated = await runCli([
         "supervisor",
         "inbox",
-        "--after-tick",
-        "0",
+        "--cursor",
+        "batch",
         "--interval-ms",
         "1",
         "--timeout-ms",
         "1000",
-        "--max-ticks",
+        "--limit",
         "1",
+        "--json",
+      ], tmp);
+      expect(truncated.exitCode).toBe(0);
+      const truncatedBody = JSON.parse(truncated.stdout);
+      expect(truncatedBody.totalActions).toBe(2);
+      expect(truncatedBody.hasMore).toBe(true);
+      expect(truncatedBody.ack).toBeNull();
+      expect(truncatedBody.items).toHaveLength(1);
+      const firstStop = await runCli(["supervisor", "stop", "--timeout-ms", "2000", "--json"], tmp);
+      expect(firstStop.exitCode).toBe(0);
+      await waitForSupervisorFixtureStop(tmp);
+
+      const cli = await runCli([
+        "supervisor",
+        "inbox",
+        "--cursor",
+        "batch",
+        "--interval-ms",
+        "1",
+        "--timeout-ms",
+        "1000",
         "--limit",
         "2",
         "--json",
@@ -2159,6 +2139,15 @@ describe("supervisor", () => {
       const result = JSON.parse(cli.stdout);
       expect(result.wait.ready).toBe(true);
       expect(result.wait.reason).toBe("actions");
+      expect(result.wait.afterTick).toBe(0);
+      expect(result.cursor).toMatchObject({ name: "batch", afterTick: 0, updatedAt: null });
+      expect(result.totalActions).toBe(2);
+      expect(result.hasMore).toBe(false);
+      expect(result.ack).toEqual({
+        name: "batch",
+        tick: result.wait.state.tickCount,
+        command: `codexctl supervisor ack batch --tick ${result.wait.state.tickCount} --json`,
+      });
       expect(result.items.map((item: { action: { jobKey: string; kind: string; severity: string } }) => ({
         key: item.action.jobKey,
         kind: item.action.kind,
@@ -2169,7 +2158,58 @@ describe("supervisor", () => {
       ]);
       expect(result.items[0].inspection.inspection.summary.key).toBe("supervisor-inbox-failed");
       expect(result.items[1].inspection.inspection.summary.key).toBe("supervisor-inbox-stale");
+      const ack = await runCli(["supervisor", "ack", "batch", "--tick", String(result.wait.state.tickCount), "--json"], tmp);
+      expect(ack.exitCode).toBe(0);
+      expect(JSON.parse(ack.stdout).cursor.afterTick).toBe(result.wait.state.tickCount);
+      const stop = await runCli(["supervisor", "stop", "--timeout-ms", "2000", "--json"], tmp);
+      expect(stop.exitCode).toBe(0);
       await waitForSupervisorFixtureStop(tmp);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor ack stores cursors without regression", async () => {
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      const ack = await runCli(["supervisor", "ack", "default", "--tick", "7", "--json"], tmp);
+      expect(ack.exitCode).toBe(0);
+      expect(JSON.parse(ack.stdout)).toMatchObject({
+        previous: { name: "default", afterTick: 0, updatedAt: null },
+        cursor: { name: "default", afterTick: 7 },
+      });
+
+      const noRegression = await runCli(["supervisor", "ack", "default", "--tick", "3", "--json"], tmp);
+      expect(noRegression.exitCode).toBe(0);
+      expect(JSON.parse(noRegression.stdout).cursor.afterTick).toBe(7);
+
+      const [highAck, lowAck] = await Promise.all([
+        runCli(["supervisor", "ack", "default", "--tick", "10", "--json"], tmp),
+        runCli(["supervisor", "ack", "default", "--tick", "4", "--json"], tmp),
+      ]);
+      expect(highAck.exitCode).toBe(0);
+      expect(lowAck.exitCode).toBe(0);
+      const finalAck = await runCli(["supervisor", "ack", "default", "--tick", "0", "--json"], tmp);
+      expect(finalAck.exitCode).toBe(0);
+      expect(JSON.parse(finalAck.stdout).cursor.afterTick).toBe(10);
+
+      const inbox = await runCli([
+        "supervisor",
+        "inbox",
+        "--cursor",
+        "default",
+        "--interval-ms",
+        "1",
+        "--timeout-ms",
+        "50",
+        "--max-ticks",
+        "1",
+        "--json",
+      ], tmp);
+      expect(inbox.exitCode).toBe(0);
+      const body = JSON.parse(inbox.stdout);
+      expect(body.cursor.afterTick).toBe(10);
+      expect(body.wait.afterTick).toBe(10);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

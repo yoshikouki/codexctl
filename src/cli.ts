@@ -27,6 +27,7 @@ import {
   workerHealth,
 } from "./job.ts";
 import {
+  ackSupervisorCursor,
   applySupervisorAction,
   inspectSupervisorAction,
   nextSupervisorAction,
@@ -64,6 +65,7 @@ const knownPublicFlags = [
   "action-id",
   "cancel",
   "confirm",
+  "cursor",
   "detach",
   "events",
   "for-session",
@@ -84,6 +86,7 @@ const knownPublicFlags = [
   "sandbox",
   "status",
   "supervisor-id",
+  "tick",
   "ticks",
   "timeout-ms",
   "wait",
@@ -362,14 +365,22 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "supervisor" && action === "inbox") {
-    allowFlags(args, ["json", "after-tick", "interval-ms", "timeout-ms", "max-ticks", "limit"]);
+    allowFlags(args, ["json", "after-tick", "cursor", "interval-ms", "timeout-ms", "max-ticks", "limit"]);
     await printJson(await readSupervisorInbox({
       afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
+      cursor: stringFlag(args, "cursor"),
       intervalMs: intervalMsFlag(args),
       timeoutMs: numberFlag(args, "timeout-ms"),
       startMaxTicks: numberFlag(args, "max-ticks") ?? undefined,
       limit: numberFlag(args, "limit") ?? undefined,
     }));
+    return;
+  }
+
+  if (resource === "supervisor" && action === "ack" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json", "tick"]);
+    await printJson(await ackSupervisorCursor(key, requiredNonNegativeIntegerFlag(args, "tick")));
     return;
   }
 
@@ -573,6 +584,13 @@ function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): num
   return parsed;
 }
 
+function requiredNonNegativeIntegerFlag(args: Args, name: string): number {
+  if (!args.flags.has(name)) {
+    throw new CliError("usage_error", `Missing required --${name}`);
+  }
+  return nonNegativeIntegerFlag(args, name, 0);
+}
+
 function optionalNonNegativeIntegerFlag(args: Args, name: string): number | undefined {
   if (!args.flags.has(name)) return undefined;
   return nonNegativeIntegerFlag(args, name, 0);
@@ -637,7 +655,8 @@ function usageText(): string {
   codexctl supervisor actions [--ticks <n>] --json
   codexctl supervisor wait [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
   codexctl supervisor next [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] --json
-  codexctl supervisor inbox [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] [--limit <n>] --json
+  codexctl supervisor inbox [--after-tick <n>|--cursor <name>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] [--limit <n>] --json
+  codexctl supervisor ack <cursor-name> --tick <n> --json
   codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
   codexctl supervisor apply <job-key> --kind <action-kind> [--action-id <id>] [--dry-run] [--confirm <token>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json

@@ -93,7 +93,7 @@ export type SupervisorAction = {
 
 export class SupervisorOperationError extends Error {
   constructor(
-    readonly code: "supervisor_action_not_found" | "supervisor_action_not_applicable" | "supervisor_confirmation_required" | "supervisor_locked" | "supervisor_identity_unverified",
+    readonly code: "supervisor_action_not_found" | "supervisor_action_not_applicable" | "supervisor_confirmation_required" | "supervisor_cursor_invalid" | "supervisor_locked" | "supervisor_identity_unverified",
     message: string,
     readonly exitCode = 2,
   ) {
@@ -176,6 +176,7 @@ export type SupervisorNextOptions = SupervisorWaitOptions & {
 };
 
 export type SupervisorInboxOptions = SupervisorNextOptions & {
+  cursor?: string | null;
   limit?: number;
 };
 
@@ -196,7 +197,29 @@ export type SupervisorInboxResult = {
   at: string;
   start: SupervisorStartResult;
   wait: SupervisorWaitResult;
+  cursor: SupervisorCursor | null;
+  ack: SupervisorInboxAck | null;
+  totalActions: number;
+  hasMore: boolean;
   items: SupervisorInboxItem[];
+};
+
+export type SupervisorCursor = {
+  name: string;
+  afterTick: number;
+  updatedAt: string | null;
+};
+
+export type SupervisorCursorAckResult = {
+  at: string;
+  previous: SupervisorCursor;
+  cursor: SupervisorCursor;
+};
+
+export type SupervisorInboxAck = {
+  name: string;
+  tick: number;
+  command: string;
 };
 
 export type SupervisorActionInspection = {
@@ -499,28 +522,72 @@ export async function nextSupervisorAction(options: SupervisorNextOptions = {}):
 }
 
 export async function readSupervisorInbox(options: SupervisorInboxOptions = {}): Promise<SupervisorInboxResult> {
+  const cursor = options.cursor ? await readSupervisorCursor(options.cursor) : null;
   const previousState = await readSupervisorStateIfExists(supervisorDir(process.cwd()));
   const start = await startSupervisor({
     intervalMs: options.startIntervalMs ?? options.intervalMs ?? 1000,
     maxTicks: options.startMaxTicks,
   });
-  const afterTick = options.afterTick ?? previousState?.tickCount ?? 0;
+  const afterTick = options.afterTick ?? cursor?.afterTick ?? previousState?.tickCount ?? 0;
   const wait = await waitForSupervisor({
     afterTick,
     intervalMs: options.intervalMs,
     timeoutMs: options.timeoutMs,
   });
   const at = new Date().toISOString();
-  const actions = sortSupervisorActions(wait.actions).slice(0, options.limit ?? wait.actions.length);
+  const allActions = sortSupervisorActions(wait.actions);
+  const actions = allActions.slice(0, options.limit ?? allActions.length);
+  const hasMore = actions.length < allActions.length;
   return {
     at,
     start,
     wait,
+    cursor,
+    ack: cursor !== null && wait.state !== null && !hasMore ? {
+      name: cursor.name,
+      tick: wait.state.tickCount,
+      command: `codexctl supervisor ack ${cursor.name} --tick ${wait.state.tickCount} --json`,
+    } : null,
+    totalActions: allActions.length,
+    hasMore,
     items: await Promise.all(actions.map(async (action) => ({
       action,
       inspection: await inspectWaitAction(action, wait, at),
     }))),
   };
+}
+
+export async function readSupervisorCursor(name: string): Promise<SupervisorCursor> {
+  assertSupervisorCursorName(name);
+  const path = supervisorCursorPath(process.cwd(), name);
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    return { name, afterTick: 0, updatedAt: null };
+  }
+  const cursor = await file.json() as Partial<SupervisorCursor>;
+  return {
+    name,
+    afterTick: typeof cursor.afterTick === "number" && Number.isInteger(cursor.afterTick) && cursor.afterTick >= 0 ? cursor.afterTick : 0,
+    updatedAt: typeof cursor.updatedAt === "string" ? cursor.updatedAt : null,
+  };
+}
+
+export async function ackSupervisorCursor(name: string, tick: number): Promise<SupervisorCursorAckResult> {
+  assertSupervisorCursorName(name);
+  const root = process.cwd();
+  return await withSupervisorCursorLock(root, name, async () => {
+    const previous = await readSupervisorCursor(name);
+    const now = new Date().toISOString();
+    const cursor: SupervisorCursor = {
+      name,
+      afterTick: Math.max(previous.afterTick, tick),
+      updatedAt: now,
+    };
+    const dir = supervisorCursorDir(root);
+    await mkdir(dir, { recursive: true });
+    await writeJsonFileAtomic(join(dir, `${name}.json`), cursor);
+    return { at: now, previous, cursor };
+  });
 }
 
 async function readRecentSupervisorActionTicks(
@@ -1110,6 +1177,41 @@ async function withSupervisorLifecycleLock<T>(dir: string, work: () => Promise<T
   throw new SupervisorOperationError("supervisor_locked", "Supervisor lifecycle state is locked by another writer");
 }
 
+async function withSupervisorCursorLock<T>(root: string, name: string, work: () => Promise<T>): Promise<T> {
+  const dir = supervisorCursorDir(root);
+  await mkdir(dir, { recursive: true });
+  const lockDir = join(dir, `${name}.lock`);
+  for (let attempt = 0; attempt < SUPERVISOR_LOCK_ATTEMPTS; attempt++) {
+    let acquired = false;
+    try {
+      await mkdir(lockDir);
+      acquired = true;
+      const ownerToken = randomUUID();
+      const createdAt = new Date().toISOString();
+      await writeSupervisorLifecycleLockOwner(lockDir, {
+        token: ownerToken,
+        pid: process.pid,
+        createdAt,
+        heartbeatAt: createdAt,
+      });
+      acquired = false;
+      try {
+        return await work();
+      } finally {
+        await releaseSupervisorLifecycleLock(lockDir, ownerToken);
+      }
+    } catch (error) {
+      if (acquired) {
+        await rm(lockDir, { recursive: true, force: true });
+      }
+      if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
+      if (await breakStaleSupervisorLifecycleLock(lockDir)) continue;
+      await Bun.sleep(SUPERVISOR_LOCK_RETRY_MS);
+    }
+  }
+  throw new SupervisorOperationError("supervisor_locked", `Supervisor cursor '${name}' is locked by another writer`);
+}
+
 type SupervisorLifecycleLockOwner = {
   token: string;
   pid: number;
@@ -1324,6 +1426,14 @@ function supervisorCommandMatches(command: string, supervisorId: string): boolea
     );
 }
 
+function assertSupervisorCursorName(name: string): void {
+  if (/^[A-Za-z0-9._-]{1,80}$/.test(name)) return;
+  throw new SupervisorOperationError(
+    "supervisor_cursor_invalid",
+    "Supervisor cursor name must be 1-80 characters and contain only letters, numbers, '.', '_', or '-'",
+  );
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -1356,6 +1466,14 @@ async function writeJsonFileAtomic(path: string, value: unknown): Promise<void> 
 
 function supervisorDir(root: string): string {
   return join(root, ".codexctl", "supervisor");
+}
+
+function supervisorCursorDir(root: string): string {
+  return join(supervisorDir(root), "cursors");
+}
+
+function supervisorCursorPath(root: string, name: string): string {
+  return join(supervisorCursorDir(root), `${name}.json`);
 }
 
 function isProcessAlive(pid: number | null): boolean {
