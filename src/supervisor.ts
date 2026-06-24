@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { appendFile, mkdir, open } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   listJobs,
@@ -21,6 +22,10 @@ const WAIT_CANCEL_CRITICAL_MS = 5 * 60_000;
 const STALE_WORKER_CRITICAL_MS = 5 * 60_000;
 const POLICY_PERSISTENCE_TICKS = 3;
 const RECOVER_DEAD_WORKER_CONFIRMATION = "recover-dead-worker";
+const START_STATE_WAIT_MS = 1_000;
+const SUPERVISOR_LOCK_ATTEMPTS = 300;
+const SUPERVISOR_LOCK_RETRY_MS = 25;
+const SUPERVISOR_LOCK_STALE_MS = 30_000;
 
 export type SupervisorTick = {
   at: string;
@@ -88,7 +93,7 @@ export type SupervisorAction = {
 
 export class SupervisorOperationError extends Error {
   constructor(
-    readonly code: "supervisor_action_not_found" | "supervisor_action_not_applicable" | "supervisor_confirmation_required",
+    readonly code: "supervisor_action_not_found" | "supervisor_action_not_applicable" | "supervisor_confirmation_required" | "supervisor_locked" | "supervisor_identity_unverified",
     message: string,
     readonly exitCode = 2,
   ) {
@@ -108,6 +113,7 @@ export type SupervisorState = {
   startedAt: string | null;
   updatedAt: string;
   pid: number | null;
+  supervisorId: string | null;
   tickCount: number;
   lastTick: SupervisorTick | null;
 };
@@ -116,6 +122,34 @@ export type SupervisorRunOptions = {
   intervalMs: number;
   once?: boolean;
   maxTicks?: number;
+  supervisorId?: string;
+};
+
+export type SupervisorStartOptions = {
+  intervalMs: number;
+  maxTicks?: number;
+};
+
+export type SupervisorStartResult = {
+  action: "started" | "already_running";
+  pid: number;
+  intervalMs: number;
+  maxTicks: number | null;
+  state: SupervisorState | null;
+  logPath: string;
+  errorLogPath: string;
+};
+
+export type SupervisorStopOptions = {
+  timeoutMs?: number;
+};
+
+export type SupervisorStopResult = {
+  action: "stop_requested" | "already_stopped" | "stale_state";
+  pid: number | null;
+  signal: "SIGTERM" | null;
+  waitedMs: number;
+  state: SupervisorState | null;
 };
 
 export type SupervisorActionInspection = {
@@ -179,6 +213,7 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pid: process.pid,
+    supervisorId: options.supervisorId ?? null,
     tickCount: 0,
     lastTick: null,
   };
@@ -199,7 +234,7 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
       if (options.once || (options.maxTicks !== undefined && state.tickCount >= options.maxTicks)) {
         break;
       }
-      await Bun.sleep(options.intervalMs);
+      await sleepUntilStop(options.intervalMs, () => stopRequested);
     }
     state.status = "stopped";
     state.updatedAt = new Date().toISOString();
@@ -221,13 +256,133 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
   }
 }
 
+export async function startSupervisor(options: SupervisorStartOptions): Promise<SupervisorStartResult> {
+  const dir = supervisorDir(process.cwd());
+  await mkdir(dir, { recursive: true });
+  return await withSupervisorLifecycleLock(dir, async () => {
+    const existing = await readSupervisorStateIfExists(dir);
+    if (existing?.status === "running" && existing.pid !== null) {
+      const identity = await supervisorProcessIdentity(existing);
+      if (identity === "match") {
+        return {
+          action: "already_running",
+          pid: existing.pid,
+          intervalMs: options.intervalMs,
+          maxTicks: options.maxTicks ?? null,
+          state: existing,
+          logPath: join(dir, "supervisor.log"),
+          errorLogPath: join(dir, "supervisor.err.log"),
+        };
+      }
+      if (identity === "unknown") {
+        throw unverifiedSupervisorIdentityError(existing);
+      }
+      await markStaleSupervisorState(dir, existing, identity);
+    }
+
+    const supervisorId = randomUUID();
+    const cmd = [
+      process.execPath,
+      import.meta.resolveSync("./cli.ts"),
+      "internal",
+      "supervisor",
+      "--interval-ms",
+      String(options.intervalMs),
+      "--supervisor-id",
+      supervisorId,
+    ];
+    if (options.maxTicks !== undefined) {
+      cmd.push("--max-ticks", String(options.maxTicks));
+    }
+    const proc = Bun.spawn({
+      cmd,
+      cwd: process.cwd(),
+      env: process.env,
+      stdin: "ignore",
+      stdout: Bun.file(join(dir, "supervisor.log")),
+      stderr: Bun.file(join(dir, "supervisor.err.log")),
+      detached: true,
+    });
+    proc.unref();
+    const state = await waitForSupervisorLaunchState(dir, proc.pid, supervisorId, START_STATE_WAIT_MS)
+      ?? await writeFallbackLaunchState(dir, proc.pid, supervisorId);
+    return {
+      action: "started",
+      pid: proc.pid,
+      intervalMs: options.intervalMs,
+      maxTicks: options.maxTicks ?? null,
+      state,
+      logPath: join(dir, "supervisor.log"),
+      errorLogPath: join(dir, "supervisor.err.log"),
+    };
+  });
+}
+
+export async function stopSupervisor(options: SupervisorStopOptions = {}): Promise<SupervisorStopResult> {
+  const dir = supervisorDir(process.cwd());
+  await mkdir(dir, { recursive: true });
+  return await withSupervisorLifecycleLock(dir, async () => {
+    const timeoutMs = options.timeoutMs ?? 5_000;
+    const startedAt = Date.now();
+    const state = await readSupervisorStateIfExists(dir);
+    if (!state || state.status !== "running" || state.pid === null) {
+      return {
+        action: "already_stopped",
+        pid: state?.pid ?? null,
+        signal: null,
+        waitedMs: 0,
+        state,
+      };
+    }
+    const identity = await supervisorProcessIdentity(state);
+    if (identity === "unknown") {
+      throw unverifiedSupervisorIdentityError(state);
+    }
+    if (identity !== "match") {
+      const stopped = await markStaleSupervisorState(dir, state, identity);
+      return {
+        action: "stale_state",
+        pid: state.pid,
+        signal: null,
+        waitedMs: 0,
+        state: stopped,
+      };
+    }
+
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch (error) {
+      if (isErrorWithCode(error) && error.code === "ESRCH") {
+        const stopped = await markStaleSupervisorState(dir, state, "dead");
+        return {
+          action: "stale_state",
+          pid: state.pid,
+          signal: null,
+          waitedMs: Math.max(0, Date.now() - startedAt),
+          state: stopped,
+        };
+      }
+      throw error;
+    }
+    let latest: SupervisorState | null = state;
+    while (Date.now() - startedAt < timeoutMs) {
+      await Bun.sleep(50);
+      latest = await readSupervisorStateIfExists(dir);
+      if (latest?.status !== "running" || !isProcessAlive(state.pid)) break;
+    }
+    return {
+      action: "stop_requested",
+      pid: state.pid,
+      signal: "SIGTERM",
+      waitedMs: Math.max(0, Date.now() - startedAt),
+      state: latest,
+    };
+  });
+}
+
 export async function readSupervisorState(): Promise<SupervisorState> {
   const state = await Bun.file(join(supervisorDir(process.cwd()), "state.json")).json() as SupervisorState;
-  const lastTick = state.lastTick;
-  if (lastTick !== null && typeof lastTick === "object" && !("reconciliation" in lastTick)) {
-    state.lastTick = Object.assign({}, lastTick, { reconciliation: null }) as SupervisorTick;
-  }
-  return state;
+  return normalizeSupervisorState(state);
 }
 
 export async function readSupervisorEvents(): Promise<unknown[]> {
@@ -720,13 +875,308 @@ function isSupervisorTickEvent(event: unknown): event is { type: "supervisor.tic
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {
-  await Bun.write(join(dir, "state.json"), JSON.stringify(state, null, 2) + "\n");
+  await writeJsonFileAtomic(join(dir, "state.json"), state);
+}
+
+async function withSupervisorLifecycleLock<T>(dir: string, work: () => Promise<T>): Promise<T> {
+  const lockDir = join(dir, "lifecycle.lock");
+  for (let attempt = 0; attempt < SUPERVISOR_LOCK_ATTEMPTS; attempt++) {
+    let acquired = false;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    try {
+      await mkdir(lockDir);
+      acquired = true;
+      const ownerToken = randomUUID();
+      const createdAt = new Date().toISOString();
+      await writeSupervisorLifecycleLockOwner(lockDir, {
+        token: ownerToken,
+        pid: process.pid,
+        createdAt,
+        heartbeatAt: createdAt,
+      });
+      acquired = false;
+      heartbeat = setInterval(() => {
+        void writeSupervisorLifecycleLockOwner(lockDir, {
+          token: ownerToken,
+          pid: process.pid,
+          createdAt,
+          heartbeatAt: new Date().toISOString(),
+        }).catch(() => {});
+      }, Math.max(1_000, Math.floor(SUPERVISOR_LOCK_STALE_MS / 3)));
+      try {
+        return await work();
+      } finally {
+        if (heartbeat !== null) clearInterval(heartbeat);
+        await releaseSupervisorLifecycleLock(lockDir, ownerToken);
+      }
+    } catch (error) {
+      if (acquired) {
+        await rm(lockDir, { recursive: true, force: true });
+      }
+      if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
+      if (await breakStaleSupervisorLifecycleLock(lockDir)) continue;
+      await Bun.sleep(SUPERVISOR_LOCK_RETRY_MS);
+    }
+  }
+  throw new SupervisorOperationError("supervisor_locked", "Supervisor lifecycle state is locked by another writer");
+}
+
+type SupervisorLifecycleLockOwner = {
+  token: string;
+  pid: number;
+  createdAt: string;
+  heartbeatAt: string;
+};
+
+async function writeSupervisorLifecycleLockOwner(lockDir: string, owner: SupervisorLifecycleLockOwner): Promise<void> {
+  await writeJsonFileAtomic(join(lockDir, "owner.json"), owner);
+}
+
+async function breakStaleSupervisorLifecycleLock(lockDir: string): Promise<boolean> {
+  try {
+    const ownerText = await Bun.file(join(lockDir, "owner.json")).text();
+    const owner = JSON.parse(ownerText) as unknown;
+    if (!isObject(owner)) return await breakStaleSupervisorLifecycleLockByMtime(lockDir, ownerText);
+    const token = typeof owner.token === "string" ? owner.token : null;
+    const pid = typeof owner.pid === "number" ? owner.pid : null;
+    const createdAt = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : Number.NaN;
+    const heartbeatAt = typeof owner.heartbeatAt === "string" ? Date.parse(owner.heartbeatAt) : createdAt;
+    if (token === null || pid === null || !Number.isFinite(heartbeatAt)) return await breakStaleSupervisorLifecycleLockByMtime(lockDir, ownerText);
+    if (!isProcessAlive(pid) || Date.now() - heartbeatAt > SUPERVISOR_LOCK_STALE_MS) {
+      if (!await supervisorLifecycleLockTokenStillMatches(lockDir, token)) return false;
+      await rm(lockDir, { recursive: true, force: true });
+      return true;
+    }
+  } catch {
+    return await breakStaleSupervisorLifecycleLockByMtime(lockDir, null);
+  }
+  return false;
+}
+
+async function breakStaleSupervisorLifecycleLockByMtime(lockDir: string, expectedOwnerText: string | null): Promise<boolean> {
+  try {
+    const info = await stat(lockDir);
+    if (Date.now() - info.mtimeMs > SUPERVISOR_LOCK_STALE_MS) {
+      if (expectedOwnerText !== null && !await supervisorLifecycleLockOwnerTextStillMatches(lockDir, expectedOwnerText)) return false;
+      await rm(lockDir, { recursive: true, force: true });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+async function supervisorLifecycleLockTokenStillMatches(lockDir: string, expectedToken: string): Promise<boolean> {
+  try {
+    const owner = JSON.parse(await Bun.file(join(lockDir, "owner.json")).text()) as unknown;
+    return isObject(owner) && owner.token === expectedToken;
+  } catch {
+    return false;
+  }
+}
+
+async function supervisorLifecycleLockOwnerTextStillMatches(lockDir: string, expectedOwnerText: string): Promise<boolean> {
+  try {
+    return await Bun.file(join(lockDir, "owner.json")).text() === expectedOwnerText;
+  } catch {
+    return false;
+  }
+}
+
+async function releaseSupervisorLifecycleLock(lockDir: string, expectedToken: string): Promise<void> {
+  if (await supervisorLifecycleLockTokenStillMatches(lockDir, expectedToken)) {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+async function readSupervisorStateIfExists(dir: string): Promise<SupervisorState | null> {
+  const file = Bun.file(join(dir, "state.json"));
+  if (!(await file.exists())) return null;
+  return normalizeSupervisorState(await file.json() as SupervisorState);
+}
+
+function normalizeSupervisorState(state: SupervisorState): SupervisorState {
+  const normalized = state as SupervisorState & { supervisorId?: string | null };
+  if (normalized.supervisorId === undefined) {
+    normalized.supervisorId = null;
+  }
+  const lastTick = state.lastTick;
+  if (lastTick !== null && typeof lastTick === "object" && !("reconciliation" in lastTick)) {
+    state.lastTick = Object.assign({}, lastTick, { reconciliation: null }) as SupervisorTick;
+  }
+  return state;
+}
+
+async function waitForSupervisorLaunchState(
+  dir: string,
+  pid: number,
+  supervisorId: string,
+  timeoutMs: number,
+): Promise<SupervisorState | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const state = await readSupervisorStateIfExists(dir);
+    if (stateBelongsToLaunch(state, pid, supervisorId)) return state;
+    if (!isProcessAlive(pid)) break;
+    await Bun.sleep(25);
+  }
+  return null;
+}
+
+async function writeFallbackLaunchState(dir: string, pid: number, supervisorId: string): Promise<SupervisorState> {
+  const now = new Date().toISOString();
+  const state: SupervisorState = {
+    status: isProcessAlive(pid) ? "running" : "stopped",
+    startedAt: now,
+    updatedAt: now,
+    pid,
+    supervisorId,
+    tickCount: 0,
+    lastTick: null,
+  };
+  await writeSupervisorState(dir, state);
+  await appendSupervisorEvent(dir, {
+    type: "supervisor.launch_state_fallback",
+    pid,
+    supervisorId,
+    status: state.status,
+  });
+  return state;
+}
+
+function stateBelongsToLaunch(state: SupervisorState | null, pid: number, supervisorId: string): state is SupervisorState {
+  return state?.pid === pid && state.supervisorId === supervisorId;
+}
+
+async function markStaleSupervisorState(
+  dir: string,
+  state: SupervisorState,
+  reason: SupervisorProcessIdentity,
+): Promise<SupervisorState> {
+  const stopped = { ...state, status: "stopped" as const, updatedAt: new Date().toISOString(), pid: null };
+  await writeSupervisorState(dir, stopped);
+  await appendSupervisorEvent(dir, { type: "supervisor.stale_state", pid: state.pid, supervisorId: state.supervisorId, reason });
+  return stopped;
+}
+
+function unverifiedSupervisorIdentityError(state: SupervisorState): SupervisorOperationError {
+  return new SupervisorOperationError(
+    "supervisor_identity_unverified",
+    `Recorded supervisor pid ${state.pid ?? "unknown"} is alive but cannot be verified; refusing to spawn another supervisor or mark it stopped`,
+  );
+}
+
+type SupervisorProcessIdentity = "match" | "dead" | "mismatch" | "unknown";
+
+async function supervisorProcessIdentity(state: SupervisorState): Promise<SupervisorProcessIdentity> {
+  if (state.pid === null || !isProcessAlive(state.pid)) return "dead";
+  if (state.supervisorId === null) return "unknown";
+  const args = await readProcessArgs(state.pid);
+  if (args !== null && supervisorArgsMatch(args, state.supervisorId)) {
+    return "match";
+  }
+  if (args !== null) return "mismatch";
+  const command = await readProcessCommand(state.pid);
+  if (command === null) return "unknown";
+  if (supervisorCommandMatches(command, state.supervisorId)) return "match";
+  return "mismatch";
+}
+
+async function readProcessArgs(pid: number): Promise<string[] | null> {
+  try {
+    const bytes = await readFile(`/proc/${pid}/cmdline`);
+    return bytes
+      .toString("utf8")
+      .split("\0")
+      .filter((arg) => arg.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+function hasFlagValue(args: string[], name: string, value: string): boolean {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === name && args[index + 1] === value) return true;
+  }
+  return false;
+}
+
+function supervisorArgsMatch(args: string[], supervisorId: string): boolean {
+  return args.includes("internal")
+    && args.includes("supervisor")
+    && hasFlagValue(args, "--supervisor-id", supervisorId);
+}
+
+async function readProcessCommand(pid: number): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["ps", "-p", String(pid), "-o", "command="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [stdout, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) return null;
+    const command = stdout.trim();
+    return command.length > 0 ? command : null;
+  } catch {
+    return null;
+  }
+}
+
+function supervisorCommandMatches(command: string, supervisorId: string): boolean {
+  return command.includes(" internal supervisor ")
+    && (
+      command.includes(` --supervisor-id ${supervisorId}`)
+      || command.includes(` --supervisor-id=${supervisorId}`)
+    );
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isErrorWithCode(error: unknown): error is { code: string } {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && typeof (error as { code?: unknown }).code === "string";
+}
+
+async function sleepUntilStop(intervalMs: number, stopped: () => boolean): Promise<void> {
+  let remainingMs = intervalMs;
+  while (!stopped() && remainingMs > 0) {
+    const sleepMs = Math.min(50, remainingMs);
+    await Bun.sleep(sleepMs);
+    remainingMs -= sleepMs;
+  }
 }
 
 async function appendSupervisorEvent(dir: string, event: Record<string, unknown>): Promise<void> {
   await appendFile(join(dir, "events.jsonl"), JSON.stringify({ ...event, at: new Date().toISOString() }) + "\n");
 }
 
+async function writeJsonFileAtomic(path: string, value: unknown): Promise<void> {
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await Bun.write(tempPath, JSON.stringify(value, null, 2) + "\n");
+  await rename(tempPath, path);
+}
+
 function supervisorDir(root: string): string {
   return join(root, ".codexctl", "supervisor");
+}
+
+function isProcessAlive(pid: number | null): boolean {
+  if (pid === null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "EPERM") {
+      return true;
+    }
+    return false;
+  }
 }

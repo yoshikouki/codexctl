@@ -32,6 +32,8 @@ import {
   readSupervisorEvents,
   readSupervisorState,
   runSupervisor,
+  startSupervisor,
+  stopSupervisor,
 } from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
@@ -1779,6 +1781,106 @@ describe("supervisor", () => {
 
       const state = await readSupervisorState();
       expect(state.lastTick?.reconciliation).toBeNull();
+      expect(state.supervisorId).toBeNull();
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor start runs detached and stop handles stale state", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      const start = await startSupervisor({ intervalMs: 1, maxTicks: 1 });
+      expect(start.action).toBe("started");
+      expect(start.pid).toBeGreaterThan(0);
+      expect(start.maxTicks).toBe(1);
+      expect(start.state?.supervisorId).toEqual(expect.any(String));
+
+      let state = null;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await Bun.sleep(50);
+        try {
+          state = await readSupervisorState();
+        } catch {
+          state = null;
+        }
+        if (state?.status === "stopped" && state.tickCount === 1) break;
+      }
+      expect(state?.status).toBe("stopped");
+      expect(state?.tickCount).toBe(1);
+      expect(await Bun.file(".codexctl/supervisor/supervisor.log").exists()).toBe(true);
+      expect(await Bun.file(".codexctl/supervisor/supervisor.err.log").exists()).toBe(true);
+
+      const longStart = await startSupervisor({ intervalMs: 10_000 });
+      expect(longStart.action).toBe("started");
+      const immediateStop = await stopSupervisor({ timeoutMs: 2_000 });
+      expect(immediateStop.action).toBe("stop_requested");
+      expect(immediateStop.pid).toBe(longStart.pid);
+      expect(immediateStop.state?.status).toBe("stopped");
+
+      const concurrentStarts = await Promise.all([
+        startSupervisor({ intervalMs: 10_000 }),
+        startSupervisor({ intervalMs: 10_000 }),
+      ]);
+      expect(concurrentStarts.map((result) => result.action).sort()).toEqual(["already_running", "started"]);
+      expect(new Set(concurrentStarts.map((result) => result.pid)).size).toBe(1);
+      const concurrentStop = await stopSupervisor({ timeoutMs: 2_000 });
+      expect(concurrentStop.action).toBe("stop_requested");
+
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "running",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: process.pid,
+        supervisorId: null,
+        tickCount: 0,
+        lastTick: null,
+      }));
+      await expect(startSupervisor({ intervalMs: 1 })).rejects.toThrow("cannot be verified");
+      await expect(stopSupervisor({ timeoutMs: 1 })).rejects.toThrow("cannot be verified");
+      expect((await readSupervisorState()).status).toBe("running");
+
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "running",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: 999_999_999,
+        tickCount: 0,
+        lastTick: null,
+      }));
+      const stop = await stopSupervisor({ timeoutMs: 1 });
+      expect(stop.action).toBe("stale_state");
+      expect(stop.state?.status).toBe("stopped");
+
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "running",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: process.pid,
+        supervisorId: "not-this-process",
+        tickCount: 0,
+        lastTick: null,
+      }));
+      const liveMismatch = await stopSupervisor({ timeoutMs: 1 });
+      expect(liveMismatch.action).toBe("stale_state");
+      expect(liveMismatch.signal).toBeNull();
+
+      const cli = await runCli(["supervisor", "stop", "--timeout-ms", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).action).toBe("already_stopped");
+
+      await mkdir(".codexctl/supervisor/lifecycle.lock", { recursive: true });
+      await Bun.write(".codexctl/supervisor/lifecycle.lock/owner.json", JSON.stringify({
+        token: "old-lock",
+        pid: process.pid,
+        createdAt: "2026-06-24T00:00:00.000Z",
+        heartbeatAt: "2026-06-24T00:00:00.000Z",
+      }));
+      const lockBreakStart = await startSupervisor({ intervalMs: 1, maxTicks: 1 });
+      expect(lockBreakStart.action).toBe("started");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

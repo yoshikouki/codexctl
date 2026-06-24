@@ -32,6 +32,8 @@ import {
   readSupervisorEvents,
   readSupervisorState,
   runSupervisor,
+  startSupervisor,
+  stopSupervisor,
   type SupervisorActionKind,
 } from "./supervisor.ts";
 
@@ -74,6 +76,7 @@ const knownPublicFlags = [
   "repo",
   "sandbox",
   "status",
+  "supervisor-id",
   "ticks",
   "timeout-ms",
   "wait",
@@ -297,6 +300,18 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "start") {
+    allowFlags(args, ["json", "interval-ms", "max-ticks"]);
+    await printJson(await startSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
+    return;
+  }
+
+  if (resource === "supervisor" && action === "stop") {
+    allowFlags(args, ["json", "timeout-ms"]);
+    await printJson(await stopSupervisor({ timeoutMs: numberFlag(args, "timeout-ms") ?? undefined }));
+    return;
+  }
+
   if (resource === "supervisor" && action === "plan") {
     allowFlags(args, ["json"]);
     await printJson(await planSupervisorActions());
@@ -352,6 +367,16 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "internal" && action === "worker" && key) {
     allowFlags(args, []);
     await runJobWorker(key);
+    return;
+  }
+
+  if (resource === "internal" && action === "supervisor") {
+    allowFlags(args, ["interval-ms", "max-ticks", "supervisor-id"]);
+    await runSupervisor({
+      intervalMs: intervalMsFlag(args),
+      maxTicks: numberFlag(args, "max-ticks") ?? undefined,
+      supervisorId: stringFlag(args, "supervisor-id") ?? undefined,
+    });
     return;
   }
 
@@ -552,6 +577,8 @@ function usageText(): string {
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait] --json
   codexctl approval reject <job-key> <approval-id> [--cancel] [--wait] --json
   codexctl supervisor once [--interval-ms <ms>] --json
+  codexctl supervisor start [--interval-ms <ms>] [--max-ticks <n>] --json
+  codexctl supervisor stop [--timeout-ms <ms>] --json
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
   codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
