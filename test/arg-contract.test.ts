@@ -21,6 +21,7 @@ import {
   reconcileJobs,
   recoverJob,
   sweepJobs,
+  waitForJob,
 } from "../src/job.ts";
 import {
   applySupervisorAction,
@@ -388,6 +389,29 @@ describe("compact job events", () => {
       expect(cli.stderr).toBe("");
       expect(JSON.parse(cli.stdout).finalResponse).toBe("done");
 
+      const wait = await waitForJob("summary-test", { eventLimit: 0, intervalMs: 1, timeoutMs: 10 });
+      expect(wait).toMatchObject({
+        key: "summary-test",
+        ready: true,
+        reason: "terminal",
+        status: "completed",
+        nextAction: "read_result",
+      });
+      expect(wait.summary.finalResponse).toBe("done");
+
+      const waitCli = await runCli(["job", "wait", "summary-test", "--events", "0", "--timeout-ms", "10", "--interval-ms", "1", "--json"], tmp);
+      expect(waitCli.exitCode).toBe(0);
+      expect(waitCli.stderr).toBe("");
+      expect(JSON.parse(waitCli.stdout)).toMatchObject({
+        ready: true,
+        reason: "terminal",
+        status: "completed",
+        nextAction: "read_result",
+        summary: {
+          finalResponse: "done",
+        },
+      });
+
       const status = await runCli(["job", "status", "summary-test", "--json"], tmp);
       expect(status.exitCode).toBe(0);
       expect(JSON.parse(status.stdout).workerHealth.reason).toBe("terminal");
@@ -395,6 +419,74 @@ describe("compact job events", () => {
       const noEvents = await runCli(["job", "summary", "summary-test", "--events", "0", "--json"], tmp);
       expect(noEvents.exitCode).toBe(0);
       expect(JSON.parse(noEvents.stdout).recentEvents).toEqual([]);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job wait returns when approval is required", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "approval-wait", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/approval-wait/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.approvals.push({
+        id: "approval-1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: {},
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const wait = await waitForJob("approval-wait", { eventLimit: 0, intervalMs: 1, timeoutMs: 10 });
+      expect(wait).toMatchObject({
+        ready: true,
+        reason: "approval_required",
+        status: "running",
+        nextAction: "resolve_approval",
+      });
+      expect(wait.summary.actionableApprovals).toHaveLength(1);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job wait returns the current summary on timeout", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "timeout-wait", repo: ".", prompt: "hello" });
+
+      const wait = await waitForJob("timeout-wait", { eventLimit: 0, intervalMs: 1, timeoutMs: 1 });
+      expect(wait).toMatchObject({
+        key: "timeout-wait",
+        ready: false,
+        reason: "timeout",
+        status: "queued",
+        nextAction: "wait",
+      });
+      expect(wait.timeoutMs).toBe(1);
+      expect(wait.summary.recentEvents).toEqual([]);
+
+      const cli = await runCli(["job", "wait", "timeout-wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout)).toMatchObject({
+        ready: false,
+        reason: "timeout",
+        status: "queued",
+        nextAction: "wait",
+      });
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

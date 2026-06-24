@@ -19,6 +19,7 @@ import {
   runJobWorker,
   startJob,
   sweepJobs,
+  waitForJob,
   workerHealth,
 } from "./job.ts";
 import {
@@ -72,6 +73,7 @@ const knownPublicFlags = [
   "sandbox",
   "status",
   "ticks",
+  "timeout-ms",
 ];
 
 export async function main(argv: string[]): Promise<void> {
@@ -149,6 +151,17 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "summary" && key) {
     allowFlags(args, ["json", "events"]);
     await printJson(await readJobSummary(key, eventLimitFlag(args)));
+    return;
+  }
+
+  if (resource === "job" && action === "wait" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json", "events", "interval-ms", "timeout-ms"]);
+    await printJson(await waitForJob(key, {
+      eventLimit: eventLimitFlag(args),
+      intervalMs: intervalMsFlag(args),
+      timeoutMs: numberFlag(args, "timeout-ms"),
+    }));
     return;
   }
 
@@ -483,6 +496,7 @@ function usageText(): string {
   codexctl job list --json
   codexctl job status <key> --json
   codexctl job summary <key> [--events <n>] --json
+  codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
   codexctl job events <key> [--format raw|compact] --json
   codexctl job watch <key> [--format raw|compact] --json
   codexctl job steer <key> --prompt <prompt> --json

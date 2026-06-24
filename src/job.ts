@@ -232,6 +232,25 @@ export type JobSummary = {
   recentEvents: CompactJobEvent[];
 };
 
+export type JobWaitOptions = {
+  eventLimit?: number;
+  intervalMs?: number;
+  timeoutMs?: number | null;
+};
+
+export type JobWaitResult = {
+  key: string;
+  ready: boolean;
+  reason: "terminal" | "approval_required" | "timeout";
+  elapsedMs: number;
+  intervalMs: number;
+  timeoutMs: number | null;
+  deadlineAt: string | null;
+  status: JobStatus;
+  nextAction: JobNextAction;
+  summary: JobSummary;
+};
+
 export type WorkerHealth = {
   pid: number | null;
   alive: boolean;
@@ -808,6 +827,28 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     diagnostics: summarizeCompactEvents(compactEvents, eventLimit),
     recentEvents,
   };
+}
+
+export async function waitForJob(key: string, options: JobWaitOptions = {}): Promise<JobWaitResult> {
+  const eventLimit = options.eventLimit ?? 10;
+  const intervalMs = options.intervalMs ?? 1000;
+  const timeoutMs = options.timeoutMs ?? null;
+  const startedAt = Date.now();
+  const deadline = timeoutMs === null ? null : startedAt + timeoutMs;
+
+  while (true) {
+    const summary = await readJobSummary(key, eventLimit);
+    const readyReason = readyReasonFor(summary);
+    const now = Date.now();
+    if (readyReason) {
+      return jobWaitResult(key, summary, true, readyReason, startedAt, now, intervalMs, timeoutMs, deadline);
+    }
+    if (deadline !== null && now >= deadline) {
+      return jobWaitResult(key, summary, false, "timeout", startedAt, now, intervalMs, timeoutMs, deadline);
+    }
+    const sleepMs = deadline === null ? intervalMs : Math.max(0, Math.min(intervalMs, deadline - now));
+    await Bun.sleep(sleepMs);
+  }
 }
 
 export async function enqueueSteer(key: string, prompt: string): Promise<ControlCommand> {
@@ -1501,6 +1542,37 @@ function nextAction(
   if (status === "failed") return "inspect_error";
   if (status === "cancelled") return "cancelled";
   return "read_result";
+}
+
+function readyReasonFor(summary: JobSummary): JobWaitResult["reason"] | null {
+  if (summary.nextAction === "resolve_approval") return "approval_required";
+  if (summary.status === "completed" || summary.status === "failed" || summary.status === "cancelled") return "terminal";
+  return null;
+}
+
+function jobWaitResult(
+  key: string,
+  summary: JobSummary,
+  ready: boolean,
+  reason: JobWaitResult["reason"],
+  startedAt: number,
+  endedAt: number,
+  intervalMs: number,
+  timeoutMs: number | null,
+  deadline: number | null,
+): JobWaitResult {
+  return {
+    key,
+    ready,
+    reason,
+    elapsedMs: Math.max(0, endedAt - startedAt),
+    intervalMs,
+    timeoutMs,
+    deadlineAt: deadline === null ? null : new Date(deadline).toISOString(),
+    status: summary.status,
+    nextAction: summary.nextAction,
+    summary,
+  };
 }
 
 function summarizeCompactEvents(events: CompactJobEvent[], eventLimit: number): JobSummaryDiagnostics {
