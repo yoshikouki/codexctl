@@ -34,6 +34,7 @@ import {
   readSupervisorActionHistory,
   readSupervisorEvents,
   readSupervisorState,
+  readSupervisorInbox,
   runSupervisor,
   startSupervisor,
   stopSupervisor,
@@ -74,6 +75,7 @@ const knownPublicFlags = [
   "json",
   "keep",
   "kind",
+  "limit",
   "key",
   "max-ticks",
   "model",
@@ -359,6 +361,18 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "inbox") {
+    allowFlags(args, ["json", "after-tick", "interval-ms", "timeout-ms", "max-ticks", "limit"]);
+    await printJson(await readSupervisorInbox({
+      afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
+      intervalMs: intervalMsFlag(args),
+      timeoutMs: numberFlag(args, "timeout-ms"),
+      startMaxTicks: numberFlag(args, "max-ticks") ?? undefined,
+      limit: numberFlag(args, "limit") ?? undefined,
+    }));
+    return;
+  }
+
   if (resource === "supervisor" && action === "inspect" && key) {
     requirePositionalCount(args, 3);
     allowFlags(args, ["json", "kind", "action-id"]);
@@ -623,6 +637,7 @@ function usageText(): string {
   codexctl supervisor actions [--ticks <n>] --json
   codexctl supervisor wait [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
   codexctl supervisor next [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] --json
+  codexctl supervisor inbox [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] [--limit <n>] --json
   codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
   codexctl supervisor apply <job-key> --kind <action-kind> [--action-id <id>] [--dry-run] [--confirm <token>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json

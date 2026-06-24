@@ -175,12 +175,28 @@ export type SupervisorNextOptions = SupervisorWaitOptions & {
   startMaxTicks?: number;
 };
 
+export type SupervisorInboxOptions = SupervisorNextOptions & {
+  limit?: number;
+};
+
 export type SupervisorNextResult = {
   at: string;
   start: SupervisorStartResult;
   wait: SupervisorWaitResult;
   action: SupervisorAction | null;
   inspection: SupervisorActionInspection | null;
+};
+
+export type SupervisorInboxItem = {
+  action: SupervisorAction;
+  inspection: SupervisorActionInspection;
+};
+
+export type SupervisorInboxResult = {
+  at: string;
+  start: SupervisorStartResult;
+  wait: SupervisorWaitResult;
+  items: SupervisorInboxItem[];
 };
 
 export type SupervisorActionInspection = {
@@ -471,6 +487,18 @@ export async function waitForSupervisor(options: SupervisorWaitOptions = {}): Pr
 }
 
 export async function nextSupervisorAction(options: SupervisorNextOptions = {}): Promise<SupervisorNextResult> {
+  const inbox = await readSupervisorInbox({ ...options, limit: 1 });
+  const item = inbox.items[0] ?? null;
+  return {
+    at: inbox.at,
+    start: inbox.start,
+    wait: inbox.wait,
+    action: item?.action ?? null,
+    inspection: item?.inspection ?? null,
+  };
+}
+
+export async function readSupervisorInbox(options: SupervisorInboxOptions = {}): Promise<SupervisorInboxResult> {
   const previousState = await readSupervisorStateIfExists(supervisorDir(process.cwd()));
   const start = await startSupervisor({
     intervalMs: options.startIntervalMs ?? options.intervalMs ?? 1000,
@@ -482,20 +510,16 @@ export async function nextSupervisorAction(options: SupervisorNextOptions = {}):
     intervalMs: options.intervalMs,
     timeoutMs: options.timeoutMs,
   });
-  const action = selectNextSupervisorAction(wait.actions);
   const at = new Date().toISOString();
+  const actions = sortSupervisorActions(wait.actions).slice(0, options.limit ?? wait.actions.length);
   return {
     at,
     start,
     wait,
-    action,
-    inspection: action === null ? null : {
-      at,
-      planAt: wait.state?.lastTick?.at ?? at,
-      readOnly: true,
+    items: await Promise.all(actions.map(async (action) => ({
       action,
-      inspection: await inspectActionPayload(action),
-    },
+      inspection: await inspectWaitAction(action, wait, at),
+    }))),
   };
 }
 
@@ -607,11 +631,28 @@ function supervisorWaitResult(
   };
 }
 
-function selectNextSupervisorAction(actions: SupervisorAction[]): SupervisorAction | null {
-  return actions.reduce<SupervisorAction | null>((selected, action) => {
-    if (selected === null) return action;
-    return severityRank(action.severity) > severityRank(selected.severity) ? action : selected;
-  }, null);
+async function inspectWaitAction(
+  action: SupervisorAction,
+  wait: SupervisorWaitResult,
+  at: string,
+): Promise<SupervisorActionInspection> {
+  return {
+    at,
+    planAt: wait.state?.lastTick?.at ?? at,
+    readOnly: true,
+    action,
+    inspection: await inspectActionPayload(action),
+  };
+}
+
+function sortSupervisorActions(actions: SupervisorAction[]): SupervisorAction[] {
+  return actions
+    .map((action, index) => ({ action, index }))
+    .sort((left, right) =>
+      severityRank(right.action.severity) - severityRank(left.action.severity)
+      || left.index - right.index
+    )
+    .map((entry) => entry.action);
 }
 
 function severityRank(severity: SupervisorAction["severity"]): number {

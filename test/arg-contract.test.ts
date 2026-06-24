@@ -55,6 +55,19 @@ async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode
   return { exitCode, stdout, stderr };
 }
 
+async function waitForSupervisorFixtureStop(root: string): Promise<void> {
+  const statePath = join(root, ".codexctl/supervisor/state.json");
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      const state = await Bun.file(statePath).json() as { status?: string };
+      if (state.status === "stopped") return;
+    } catch {
+      // State may not have been written yet, or may be between atomic writes.
+    }
+    await Bun.sleep(10);
+  }
+}
+
 describe("cli output contract", () => {
   test("inline flags preserve equals in values", () => {
     const args = parseArgs(["job", "start", "--key=inline-equals", "--prompt=a=b"]);
@@ -2076,6 +2089,87 @@ describe("supervisor", () => {
           },
         },
       });
+      await waitForSupervisorFixtureStop(tmp);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor inbox inspects fresh actions as a severity-ordered batch", async () => {
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      await mkdir(join(tmp, ".codexctl/jobs/supervisor-inbox-failed"), { recursive: true });
+      await mkdir(join(tmp, ".codexctl/jobs/supervisor-inbox-stale"), { recursive: true });
+      const now = new Date().toISOString();
+      const oldHeartbeat = new Date(Date.now() - 31_000).toISOString();
+      const baseJob = {
+        jobIncarnation: null,
+        repo: ".",
+        prompt: "hello",
+        model: null,
+        approvalPolicy: "on-request",
+        sandbox: null,
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now,
+        completedAt: null,
+        workerId: null,
+        workerGeneration: 0,
+        workerPid: null,
+        workerHeartbeatAt: null,
+        threadId: null,
+        turnId: null,
+        cancelRequestedAt: null,
+        cancelCommandId: null,
+        approvals: [],
+        finalResponse: "",
+        error: null,
+      };
+      await Bun.write(join(tmp, ".codexctl/jobs/supervisor-inbox-failed/job.json"), JSON.stringify({
+        ...baseJob,
+        key: "supervisor-inbox-failed",
+        status: "failed",
+        completedAt: now,
+        error: "boom",
+      }));
+      await Bun.write(join(tmp, ".codexctl/jobs/supervisor-inbox-stale/job.json"), JSON.stringify({
+        ...baseJob,
+        key: "supervisor-inbox-stale",
+        status: "running",
+        workerPid: process.pid,
+        workerHeartbeatAt: oldHeartbeat,
+      }));
+
+      const cli = await runCli([
+        "supervisor",
+        "inbox",
+        "--after-tick",
+        "0",
+        "--interval-ms",
+        "1",
+        "--timeout-ms",
+        "1000",
+        "--max-ticks",
+        "1",
+        "--limit",
+        "2",
+        "--json",
+      ], tmp);
+      expect(cli.exitCode).toBe(0);
+      const result = JSON.parse(cli.stdout);
+      expect(result.wait.ready).toBe(true);
+      expect(result.wait.reason).toBe("actions");
+      expect(result.items.map((item: { action: { jobKey: string; kind: string; severity: string } }) => ({
+        key: item.action.jobKey,
+        kind: item.action.kind,
+        severity: item.action.severity,
+      }))).toEqual([
+        { key: "supervisor-inbox-failed", kind: "inspect_error", severity: "critical" },
+        { key: "supervisor-inbox-stale", kind: "inspect_stale_worker", severity: "attention" },
+      ]);
+      expect(result.items[0].inspection.inspection.summary.key).toBe("supervisor-inbox-failed");
+      expect(result.items[1].inspection.inspection.summary.key).toBe("supervisor-inbox-stale");
+      await waitForSupervisorFixtureStop(tmp);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
