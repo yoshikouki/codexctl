@@ -72,7 +72,7 @@ Known generic error codes are `usage_error`, `invalid_flag`, `missing_json_flag`
 
 `job start --detach` creates the job record and spawns one detached worker process for that job. The worker owns the app-server stdio connection.
 
-Running workers refresh `worker-heartbeat.json` roughly once per second while the worker is active. `readJob` overlays it onto the returned job record as `workerHeartbeatAt`; `job list` includes `workerHeartbeatAt` and `workerAlive`; `job status` and `job summary` expose `workerHealth` with `alive`, `heartbeatAgeMs`, `stale`, and a reason such as `alive_recent`, `alive_stale`, or `dead`. This is an observability contract for callers. It does not by itself make stale-but-live workers eligible for deletion, replay, or automatic interruption.
+Running workers refresh `worker-heartbeat.json` roughly once per second while the worker is active. `readJob` overlays it onto the returned job record as `workerHeartbeatAt`; `job list` includes `nextAction`, `workerHeartbeatAt`, `workerAlive`, `workerHealth`, approval counts, and cancel metadata; `job status` and `job summary` expose `workerHealth` with `alive`, `heartbeatAgeMs`, `stale`, and a reason such as `alive_recent`, `alive_stale`, or `dead`. This is an observability contract for callers. It does not by itself make stale-but-live workers eligible for deletion, replay, or automatic interruption.
 
 `job recover` reconciles persisted state with the detached worker. Queued jobs and jobs whose worker died before app-server thread creation are restarted. Jobs with an in-flight `threadId` / `turnId` are marked failed if their worker process is gone, because the current stdio app-server session cannot be safely resumed without risking duplicate execution.
 
@@ -82,9 +82,9 @@ Running workers refresh `worker-heartbeat.json` roughly once per second while th
 
 `job prune` cleans local job records in bulk. By default it only considers `completed` jobs, sorts them by `updatedAt` descending, keeps the newest `--keep <n>` records, and removes the older matches. `--status failed`, `--status cancelled`, or `--status terminal` must be passed explicitly to include failure/cancellation debugging records. It never removes queued/running jobs. `--dry-run` previews the exact records that would be removed.
 
-`job list` summarizes local job records. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
+`job list` summarizes local job records as an agent overview: status, `nextAction`, worker health, pending/actionable approval counts, and cancel metadata. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
-`supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. `--max-ticks` is available for tests and bounded dogfood runs.
+`supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. Each tick includes a compact health count summary so controllers can detect stale workers, dead workers, pending approvals, waiting cancellations, and failed jobs without replaying all job records. `--max-ticks` is available for tests and bounded dogfood runs.
 
 `job summary` returns a single post-run object for agent callers: current job state, prompt, `nextAction`, worker health, pending and actionable approvals, whether approvals can be resolved, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. `--events <n>` controls the compact event tail size and defaults to 10. Use `--events 0` to omit the event tail while keeping diagnostics.
 

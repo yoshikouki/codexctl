@@ -1,10 +1,27 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { sweepJobs, type JobRecoveryResult } from "./job.ts";
+import { listJobs, sweepJobs, type JobListItem, type JobRecoveryResult } from "./job.ts";
 
 export type SupervisorTick = {
   at: string;
+  health: SupervisorHealthSummary;
   recovered: JobRecoveryResult[];
+};
+
+export type SupervisorHealthSummary = {
+  total: number;
+  unreadable: number;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  staleWorkers: number;
+  deadWorkers: number;
+  pendingApprovals: number;
+  actionableApprovals: number;
+  waitingCancel: number;
+  inspectError: number;
 };
 
 export type SupervisorState = {
@@ -90,10 +107,47 @@ export async function readSupervisorEvents(): Promise<unknown[]> {
 }
 
 async function supervisorTick(): Promise<SupervisorTick> {
+  const recovered = await sweepJobs();
+  const jobs = await listJobs();
   return {
     at: new Date().toISOString(),
-    recovered: await sweepJobs(),
+    health: summarizeJobHealth(jobs),
+    recovered,
   };
+}
+
+function summarizeJobHealth(jobs: JobListItem[]): SupervisorHealthSummary {
+  const summary: SupervisorHealthSummary = {
+    total: jobs.length,
+    unreadable: 0,
+    queued: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    staleWorkers: 0,
+    deadWorkers: 0,
+    pendingApprovals: 0,
+    actionableApprovals: 0,
+    waitingCancel: 0,
+    inspectError: 0,
+  };
+
+  for (const job of jobs) {
+    if (job.status === "unreadable") {
+      summary.unreadable++;
+    } else {
+      summary[job.status]++;
+    }
+    if (job.workerHealth?.stale) summary.staleWorkers++;
+    if (job.workerHealth && !job.workerHealth.alive && job.status === "running") summary.deadWorkers++;
+    summary.pendingApprovals += job.pendingApprovals;
+    summary.actionableApprovals += job.actionableApprovals;
+    if (job.nextAction === "wait_cancel") summary.waitingCancel++;
+    if (job.nextAction === "inspect_error") summary.inspectError++;
+  }
+
+  return summary;
 }
 
 async function writeSupervisorState(dir: string, state: SupervisorState): Promise<void> {

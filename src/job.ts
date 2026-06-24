@@ -131,20 +131,26 @@ export type JobPruneStatus = "completed" | "failed" | "cancelled" | "terminal";
 export type JobListItem = {
   key: string;
   status: JobStatus | "unreadable";
+  nextAction: JobNextAction | null;
   updatedAt: string | null;
   workerPid: number | null;
   workerHeartbeatAt: string | null;
   workerAlive: boolean | null;
+  workerHealth: WorkerHealth | null;
   threadId: string | null;
   turnId: string | null;
   pendingApprovals: number;
+  actionableApprovals: number;
+  cancelRequestedAt: string | null;
   error: string | null;
 };
+
+export type JobNextAction = "wait" | "wait_cancel" | "resolve_approval" | "read_result" | "inspect_error" | "cancelled";
 
 export type JobSummary = {
   key: string;
   status: JobStatus;
-  nextAction: "wait" | "wait_cancel" | "resolve_approval" | "read_result" | "inspect_error" | "cancelled";
+  nextAction: JobNextAction;
   repo: string;
   prompt: string;
   model: string | null;
@@ -250,13 +256,17 @@ export async function listJobs(): Promise<JobListItem[]> {
         return {
           key: entry.name,
           status: "unreadable",
+          nextAction: null,
           updatedAt: null,
           workerPid: null,
           workerHeartbeatAt: null,
           workerAlive: null,
+          workerHealth: null,
           threadId: null,
           turnId: null,
           pendingApprovals: 0,
+          actionableApprovals: 0,
+          cancelRequestedAt: null,
           error: error instanceof Error ? error.message : String(error),
         };
       }
@@ -1061,16 +1071,24 @@ async function overlayWorkerHeartbeat(record: JobRecord, dir: string): Promise<J
 }
 
 function summarizeJob(job: JobRecord): JobListItem {
+  const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
+  const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
+  const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
+  const health = workerHealth(job);
   return {
     key: job.key,
     status: job.status,
+    nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     updatedAt: job.updatedAt,
     workerPid: job.workerPid,
     workerHeartbeatAt: job.workerHeartbeatAt,
-    workerAlive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
+    workerAlive: health.alive,
+    workerHealth: health,
     threadId: job.threadId,
     turnId: job.turnId,
-    pendingApprovals: job.approvals.filter((approval) => approval.status === "pending").length,
+    pendingApprovals: pendingApprovals.length,
+    actionableApprovals: actionableApprovals.length,
+    cancelRequestedAt: job.cancelRequestedAt,
     error: job.error,
   };
 }

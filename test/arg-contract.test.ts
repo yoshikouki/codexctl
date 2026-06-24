@@ -589,6 +589,9 @@ describe("event store", () => {
       expect(recoveredSummary.nextAction).toBe("wait_cancel");
       expect(recoveredSummary.cancelRequestedAt).toBe(result.command?.at);
       expect(recoveredSummary.cancelCommandId).toBe(result.command?.id);
+      const cancelListItem = (await listJobs()).find((candidate) => candidate.key === "cancel-running-test");
+      expect(cancelListItem?.nextAction).toBe("wait_cancel");
+      expect(cancelListItem?.cancelRequestedAt).toBe(result.command?.at);
 
       const cli = await runCli(["job", "cancel", "cancel-running-test", "--json"], tmp);
       expect(cli.exitCode).toBe(0);
@@ -852,9 +855,13 @@ describe("job control files", () => {
       const jobs = await listJobs();
       expect(jobs.map((job) => job.key).sort()).toEqual(["completed-job", "legacy-job", "stale-job"]);
       expect(jobs.find((job) => job.key === "completed-job")?.pendingApprovals).toBe(1);
+      expect(jobs.find((job) => job.key === "completed-job")?.actionableApprovals).toBe(0);
+      expect(jobs.find((job) => job.key === "completed-job")?.nextAction).toBe("read_result");
       expect(jobs.find((job) => job.key === "legacy-job")?.pendingApprovals).toBe(0);
       expect(jobs.find((job) => job.key === "legacy-job")?.workerHeartbeatAt).toBe(null);
       expect(jobs.find((job) => job.key === "stale-job")?.workerAlive).toBe(false);
+      expect(jobs.find((job) => job.key === "stale-job")?.workerHealth?.reason).toBe("no_worker_pid");
+      expect(jobs.find((job) => job.key === "stale-job")?.workerHealth?.stale).toBe(true);
 
       const sweep = await sweepJobs();
       expect(sweep).toHaveLength(1);
@@ -911,6 +918,10 @@ describe("supervisor", () => {
       expect(state.tickCount).toBe(1);
       expect(state.lastTick?.recovered).toHaveLength(1);
       expect(state.lastTick?.recovered[0]?.job.key).toBe("supervisor-stale");
+      expect(state.lastTick?.health.total).toBe(1);
+      expect(state.lastTick?.health.failed).toBe(1);
+      expect(state.lastTick?.health.inspectError).toBe(1);
+      expect(state.lastTick?.health.deadWorkers).toBe(0);
       expect((await readSupervisorState()).tickCount).toBe(1);
       expect(await Bun.file(".codexctl/supervisor/state.json").exists()).toBe(true);
       expect((await readSupervisorEvents()).map((event) => (event as { type?: string }).type)).toContain("supervisor.tick");
