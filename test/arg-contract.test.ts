@@ -12,6 +12,7 @@ import {
   listJobs,
   readApprovals,
   readJobEvents,
+  readJobSummary,
   readNewEventLines,
   recoverJob,
   sweepJobs,
@@ -259,6 +260,119 @@ describe("compact job events", () => {
         status: "completed",
         error: null,
       }]);
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("job summary returns final response, approvals, and recent compact events", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await createJob({ key: "summary-test", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/summary-test/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "completed";
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      job.finalResponse = "done";
+      job.completedAt = new Date().toISOString();
+      job.approvals.push({
+        id: "approval-1",
+        serverRequestId: 1,
+        method: "item/commandExecution/requestApproval",
+        params: {},
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+        decision: null,
+        error: null,
+      });
+      await Bun.write(jobPath, JSON.stringify(job));
+      await Bun.write(".codexctl/jobs/summary-test/events.jsonl", [
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "thread/started",
+            params: { thread: { id: "thread-1" } },
+          },
+          at: "2026-06-24T00:00:00.000Z",
+        }),
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "warning",
+            params: { message: "careful", threadId: "thread-1", turnId: "turn-1" },
+          },
+          at: "2026-06-24T00:00:00.500Z",
+        }),
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "item/completed",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              item: {
+                type: "commandExecution",
+                id: "cmd-1",
+                command: "false",
+                status: "failed",
+                exitCode: 1,
+                durationMs: 12,
+              },
+            },
+          },
+          at: "2026-06-24T00:00:00.750Z",
+        }),
+        JSON.stringify({
+          direction: "server",
+          message: {
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed" },
+            },
+          },
+          at: "2026-06-24T00:00:01.000Z",
+        }),
+        "",
+      ].join("\n"));
+
+      const summary = await readJobSummary("summary-test", 1);
+      expect(summary.status).toBe("completed");
+      expect(summary.nextAction).toBe("read_result");
+      expect(summary.finalResponse).toBe("done");
+      expect(summary.pendingApprovals).toHaveLength(1);
+      expect(summary.actionableApprovals).toHaveLength(0);
+      expect(summary.canResolveApprovals).toBe(false);
+      expect(summary.approvalCounts.pending).toBe(1);
+      expect(summary.diagnostics.compactEventCount).toBe(4);
+      expect(summary.diagnostics.recentEventsLimit).toBe(1);
+      expect(summary.diagnostics.recentEventsTruncated).toBe(true);
+      expect(summary.diagnostics.warningCount).toBe(1);
+      expect(summary.diagnostics.commandCounts.failed).toBe(1);
+      expect(summary.diagnostics.lastWarning?.message).toBe("careful");
+      expect(summary.diagnostics.lastFailedCommand?.command).toBe("false");
+      expect(summary.recentEvents).toEqual([{
+        type: "turn.completed",
+        at: "2026-06-24T00:00:01.000Z",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        status: "completed",
+        error: null,
+      }]);
+
+      const cli = await runCli(["job", "summary", "summary-test", "--events", "1", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(cli.stderr).toBe("");
+      expect(JSON.parse(cli.stdout).finalResponse).toBe("done");
+
+      const noEvents = await runCli(["job", "summary", "summary-test", "--events", "0", "--json"], tmp);
+      expect(noEvents.exitCode).toBe(0);
+      expect(JSON.parse(noEvents.stdout).recentEvents).toEqual([]);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });

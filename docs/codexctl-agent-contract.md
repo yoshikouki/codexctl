@@ -32,6 +32,7 @@ codexctl job start --detach --repo . --key demo --prompt "Respond exactly: ok" -
 codexctl job start --detach --approval-policy untrusted --sandbox read-only --repo . --key demo --prompt "Run pwd" --json
 codexctl job list --json
 codexctl job status demo --json
+codexctl job summary demo --events 10 --json
 codexctl job events demo --format compact --json
 codexctl job watch demo --format compact --json
 codexctl job steer demo --prompt "Narrow the answer." --json
@@ -73,6 +74,8 @@ Known error codes are `usage_error`, `invalid_flag`, `missing_json_flag`, and `i
 `job list` summarizes local job records. `job sweep` is the supervisor primitive: it runs recovery for every queued or running local job and returns the per-job recovery result.
 
 `supervisor once` runs one sweep and records supervisor state. `supervisor run` repeats sweeps until interrupted. `--max-ticks` is available for tests and bounded dogfood runs.
+
+`job summary` returns a single post-run object for agent callers: current job state, prompt, `nextAction`, pending and actionable approvals, whether approvals can be resolved, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. `--events <n>` controls the compact event tail size and defaults to 10. Use `--events 0` to omit the event tail while keeping diagnostics.
 
 `job events` and `job watch` support `--format raw` and `--format compact`. Raw mode emits the persisted app-server event log exactly as JSON Lines. Compact mode emits only agent-useful lifecycle events: worker/control events, thread and turn starts, approval requests, command starts/completions, failed MCP startup notifications, warnings, app-server errors, completed assistant messages, and turn completions. Server-derived compact events include thread/turn identifiers when app-server provides them. Compact mode filters streaming token deltas and reasoning deltas.
 

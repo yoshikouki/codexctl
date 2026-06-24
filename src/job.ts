@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
+import { compactJobEvent, type CompactJobEvent } from "./events.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
@@ -81,6 +82,49 @@ export type JobListItem = {
   turnId: string | null;
   pendingApprovals: number;
   error: string | null;
+};
+
+export type JobSummary = {
+  key: string;
+  status: JobStatus;
+  nextAction: "wait" | "resolve_approval" | "read_result" | "inspect_error";
+  repo: string;
+  prompt: string;
+  model: string | null;
+  approvalPolicy: JobRecord["approvalPolicy"];
+  sandbox: JobRecord["sandbox"];
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  workerPid: number | null;
+  threadId: string | null;
+  turnId: string | null;
+  pendingApprovals: ApprovalRecord[];
+  actionableApprovals: ApprovalRecord[];
+  canResolveApprovals: boolean;
+  approvalCounts: Record<ApprovalStatus, number>;
+  finalResponse: string;
+  error: string | null;
+  diagnostics: JobSummaryDiagnostics;
+  recentEvents: CompactJobEvent[];
+};
+
+export type JobSummaryDiagnostics = {
+  compactEventCount: number;
+  recentEventsLimit: number;
+  recentEventsTruncated: boolean;
+  warningCount: number;
+  mcpFailureCount: number;
+  appServerErrorCount: number;
+  commandCounts: {
+    started: number;
+    completed: number;
+    failed: number;
+  };
+  lastWarning: Extract<CompactJobEvent, { type: "warning" }> | null;
+  lastError: Extract<CompactJobEvent, { type: "app_server.error" }> | null;
+  lastFailedCommand: Extract<CompactJobEvent, { type: "command.completed" }> | null;
 };
 
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
@@ -306,6 +350,40 @@ export async function readJobEvents(key: string): Promise<unknown[]> {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as unknown);
+}
+
+export async function readJobSummary(key: string, eventLimit = 10): Promise<JobSummary> {
+  const job = await readJob(key);
+  const compactEvents = (await readJobEvents(key)).flatMap((event) => compactJobEvent(event));
+  const recentEvents = eventLimit <= 0 ? [] : compactEvents.slice(-eventLimit);
+  const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
+  const canResolveApprovals = job.status === "running";
+  const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
+  return {
+    key: job.key,
+    status: job.status,
+    nextAction: nextAction(job.status, actionableApprovals),
+    repo: job.repo,
+    prompt: job.prompt,
+    model: job.model,
+    approvalPolicy: job.approvalPolicy,
+    sandbox: job.sandbox,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    workerPid: job.workerPid,
+    threadId: job.threadId,
+    turnId: job.turnId,
+    pendingApprovals,
+    actionableApprovals,
+    canResolveApprovals,
+    approvalCounts: approvalCounts(job.approvals),
+    finalResponse: job.finalResponse,
+    error: job.error,
+    diagnostics: summarizeCompactEvents(compactEvents, eventLimit),
+    recentEvents,
+  };
 }
 
 export async function enqueueSteer(key: string, prompt: string): Promise<ControlCommand> {
@@ -679,6 +757,79 @@ function summarizeJob(job: JobRecord): JobListItem {
     pendingApprovals: job.approvals.filter((approval) => approval.status === "pending").length,
     error: job.error,
   };
+}
+
+function approvalCounts(approvals: ApprovalRecord[]): Record<ApprovalStatus, number> {
+  const counts: Record<ApprovalStatus, number> = {
+    approved: 0,
+    cancelled: 0,
+    pending: 0,
+    rejected: 0,
+    unsupported: 0,
+  };
+  for (const approval of approvals) {
+    counts[approval.status]++;
+  }
+  return counts;
+}
+
+function nextAction(
+  status: JobStatus,
+  actionableApprovals: ApprovalRecord[],
+): JobSummary["nextAction"] {
+  if (actionableApprovals.length > 0) return "resolve_approval";
+  if (status === "queued" || status === "running") return "wait";
+  if (status === "failed") return "inspect_error";
+  return "read_result";
+}
+
+function summarizeCompactEvents(events: CompactJobEvent[], eventLimit: number): JobSummaryDiagnostics {
+  const diagnostics: JobSummaryDiagnostics = {
+    compactEventCount: events.length,
+    recentEventsLimit: eventLimit,
+    recentEventsTruncated: eventLimit <= 0 ? events.length > 0 : events.length > eventLimit,
+    warningCount: 0,
+    mcpFailureCount: 0,
+    appServerErrorCount: 0,
+    commandCounts: {
+      started: 0,
+      completed: 0,
+      failed: 0,
+    },
+    lastWarning: null,
+    lastError: null,
+    lastFailedCommand: null,
+  };
+
+  for (const event of events) {
+    if (event.type === "warning") {
+      diagnostics.warningCount++;
+      diagnostics.lastWarning = event;
+      continue;
+    }
+    if (event.type === "mcp.failed") {
+      diagnostics.mcpFailureCount++;
+      continue;
+    }
+    if (event.type === "app_server.error") {
+      diagnostics.appServerErrorCount++;
+      diagnostics.lastError = event;
+      continue;
+    }
+    if (event.type === "command.started") {
+      diagnostics.commandCounts.started++;
+      continue;
+    }
+    if (event.type === "command.completed") {
+      diagnostics.commandCounts.completed++;
+      if (event.status === "failed" || (event.exitCode !== null && event.exitCode !== 0)) {
+        diagnostics.commandCounts.failed++;
+        diagnostics.lastFailedCommand = event;
+      }
+    }
+  }
+
+  return diagnostics;
 }
 
 function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {

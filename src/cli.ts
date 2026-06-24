@@ -9,6 +9,7 @@ import {
   readApprovals,
   readJob,
   readJobEvents,
+  readJobSummary,
   readNewEventLines,
   recoverJob,
   runJobWorker,
@@ -37,6 +38,7 @@ const knownPublicFlags = [
   "approval-policy",
   "cancel",
   "detach",
+  "events",
   "for-session",
   "format",
   "force",
@@ -114,6 +116,12 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "result" && key) {
     allowFlags(args, ["json"]);
     await printJson(await readJob(key));
+    return;
+  }
+
+  if (resource === "job" && action === "summary" && key) {
+    allowFlags(args, ["json", "events"]);
+    await printJson(await readJobSummary(key, eventLimitFlag(args)));
     return;
   }
 
@@ -300,6 +308,16 @@ function intervalMsFlag(args: Args): number {
   return numberFlag(args, "interval-ms") ?? 1000;
 }
 
+function eventLimitFlag(args: Args): number {
+  const value = stringFlag(args, "events");
+  if (value === null) return 10;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new CliError("invalid_flag", "--events must be a non-negative integer");
+  }
+  return parsed;
+}
+
 function numberFlag(args: Args, name: string): number | null {
   const value = stringFlag(args, name);
   if (value === null) return null;
@@ -330,6 +348,7 @@ function usageText(): string {
   codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
   codexctl job list --json
   codexctl job status <key> --json
+  codexctl job summary <key> [--events <n>] --json
   codexctl job events <key> [--format raw|compact] --json
   codexctl job watch <key> [--format raw|compact] --json
   codexctl job steer <key> --prompt <prompt> --json
