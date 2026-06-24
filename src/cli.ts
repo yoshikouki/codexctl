@@ -36,6 +36,7 @@ import {
   runSupervisor,
   startSupervisor,
   stopSupervisor,
+  waitForSupervisor,
   type SupervisorActionKind,
 } from "./supervisor.ts";
 
@@ -56,6 +57,7 @@ class CliError extends Error {
 
 const knownPublicFlags = [
   "all",
+  "after-tick",
   "approval-policy",
   "action-id",
   "cancel",
@@ -335,6 +337,16 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (resource === "supervisor" && action === "wait") {
+    allowFlags(args, ["json", "after-tick", "interval-ms", "timeout-ms"]);
+    await printJson(await waitForSupervisor({
+      afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
+      intervalMs: intervalMsFlag(args),
+      timeoutMs: numberFlag(args, "timeout-ms"),
+    }));
+    return;
+  }
+
   if (resource === "supervisor" && action === "inspect" && key) {
     requirePositionalCount(args, 3);
     allowFlags(args, ["json", "kind", "action-id"]);
@@ -535,6 +547,11 @@ function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): num
   return parsed;
 }
 
+function optionalNonNegativeIntegerFlag(args: Args, name: string): number | undefined {
+  if (!args.flags.has(name)) return undefined;
+  return nonNegativeIntegerFlag(args, name, 0);
+}
+
 function numberFlag(args: Args, name: string): number | null {
   const value = args.flags.get(name);
   if (value === undefined) return null;
@@ -592,6 +609,7 @@ function usageText(): string {
   codexctl supervisor stop [--timeout-ms <ms>] --json
   codexctl supervisor plan --json
   codexctl supervisor actions [--ticks <n>] --json
+  codexctl supervisor wait [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
   codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
   codexctl supervisor apply <job-key> --kind <action-kind> [--action-id <id>] [--dry-run] [--confirm <token>] --json
   codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json

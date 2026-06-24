@@ -152,6 +152,24 @@ export type SupervisorStopResult = {
   state: SupervisorState | null;
 };
 
+export type SupervisorWaitOptions = {
+  afterTick?: number;
+  intervalMs?: number;
+  timeoutMs?: number | null;
+};
+
+export type SupervisorWaitResult = {
+  ready: boolean;
+  reason: "actions" | "stale" | "stopped" | "tick" | "timeout";
+  elapsedMs: number;
+  intervalMs: number;
+  afterTick: number;
+  timeoutMs: number | null;
+  deadlineAt: string | null;
+  state: SupervisorState | null;
+  actions: SupervisorAction[];
+};
+
 export type SupervisorActionInspection = {
   at: string;
   planAt: string;
@@ -202,6 +220,7 @@ export type SupervisorActionApplication = {
 export async function runSupervisor(options: SupervisorRunOptions): Promise<SupervisorState> {
   const dir = supervisorDir(process.cwd());
   await mkdir(dir, { recursive: true });
+  const previousState = await readSupervisorStateIfExists(dir);
   let stopRequested = false;
   const requestStop = () => {
     stopRequested = true;
@@ -214,10 +233,11 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
     updatedAt: new Date().toISOString(),
     pid: process.pid,
     supervisorId: options.supervisorId ?? null,
-    tickCount: 0,
-    lastTick: null,
+    tickCount: previousState?.tickCount ?? 0,
+    lastTick: previousState?.lastTick ?? null,
   };
   let previousTick: SupervisorTick | null = null;
+  let runTickCount = 0;
   await writeSupervisorState(dir, state);
   await appendSupervisorEvent(dir, { type: "supervisor.started", pid: process.pid, intervalMs: options.intervalMs });
 
@@ -225,13 +245,14 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
     while (!stopRequested) {
       const tick = await supervisorTick(previousTick);
       state.tickCount++;
+      runTickCount++;
       state.lastTick = tick;
       previousTick = tick;
       state.updatedAt = tick.at;
       await writeSupervisorState(dir, state);
       await appendSupervisorEvent(dir, { type: "supervisor.tick", tick });
 
-      if (options.once || (options.maxTicks !== undefined && state.tickCount >= options.maxTicks)) {
+      if (options.once || (options.maxTicks !== undefined && runTickCount >= options.maxTicks)) {
         break;
       }
       await sleepUntilStop(options.intervalMs, () => stopRequested);
@@ -408,6 +429,34 @@ export async function readSupervisorActionHistory(tickLimit = 10): Promise<Super
   };
 }
 
+export async function waitForSupervisor(options: SupervisorWaitOptions = {}): Promise<SupervisorWaitResult> {
+  const dir = supervisorDir(process.cwd());
+  const afterTick = options.afterTick ?? 0;
+  const intervalMs = options.intervalMs ?? 1000;
+  const timeoutMs = options.timeoutMs ?? null;
+  const startedAt = Date.now();
+  const deadline = timeoutMs === null ? null : startedAt + timeoutMs;
+
+  while (true) {
+    const state = await readSupervisorStateIfExists(dir);
+    const rawActions = state?.lastTick?.actions ?? [];
+    const actions = state !== null && state.tickCount > afterTick ? rawActions : [];
+    const now = Date.now();
+    if (await supervisorWaitStateIsStale(state)) {
+      return supervisorWaitResult(state, [], true, "stale", startedAt, now, intervalMs, afterTick, timeoutMs, deadline);
+    }
+    const reason = supervisorWaitReadyReason(state, actions, afterTick);
+    if (reason) {
+      return supervisorWaitResult(state, actions, true, reason, startedAt, now, intervalMs, afterTick, timeoutMs, deadline);
+    }
+    if (deadline !== null && now >= deadline) {
+      return supervisorWaitResult(state, actions, false, "timeout", startedAt, now, intervalMs, afterTick, timeoutMs, deadline);
+    }
+    const sleepMs = deadline === null ? intervalMs : Math.max(0, Math.min(intervalMs, deadline - now));
+    await Bun.sleep(sleepMs);
+  }
+}
+
 async function readRecentSupervisorActionTicks(
   dir: string,
   tickLimit: number,
@@ -469,6 +518,50 @@ function parseSupervisorActionTickLine(line: string): SupervisorActionHistoryTic
     tickAt: event.tick.at,
     health: event.tick.health,
     actions: event.tick.actions.map(normalizeSupervisorAction),
+  };
+}
+
+function supervisorWaitReadyReason(
+  state: SupervisorState | null,
+  actions: SupervisorAction[],
+  afterTick: number,
+): SupervisorWaitResult["reason"] | null {
+  const hasFreshTick = state !== null && state.tickCount > afterTick;
+  if (actions.length > 0) return "actions";
+  if (state?.status === "running" && !isProcessAlive(state.pid)) return "stale";
+  if (hasFreshTick) return "tick";
+  if (state?.status === "stopped") return "stopped";
+  return null;
+}
+
+async function supervisorWaitStateIsStale(state: SupervisorState | null): Promise<boolean> {
+  if (state?.status !== "running") return false;
+  const identity = await supervisorProcessIdentity(state);
+  return identity === "dead" || identity === "mismatch";
+}
+
+function supervisorWaitResult(
+  state: SupervisorState | null,
+  actions: SupervisorAction[],
+  ready: boolean,
+  reason: SupervisorWaitResult["reason"],
+  startedAt: number,
+  now: number,
+  intervalMs: number,
+  afterTick: number,
+  timeoutMs: number | null,
+  deadline: number | null,
+): SupervisorWaitResult {
+  return {
+    ready,
+    reason,
+    elapsedMs: Math.max(0, now - startedAt),
+    intervalMs,
+    afterTick,
+    timeoutMs,
+    deadlineAt: deadline === null ? null : new Date(deadline).toISOString(),
+    state,
+    actions,
   };
 }
 
@@ -1026,14 +1119,15 @@ async function waitForSupervisorLaunchState(
 
 async function writeFallbackLaunchState(dir: string, pid: number, supervisorId: string): Promise<SupervisorState> {
   const now = new Date().toISOString();
+  const previousState = await readSupervisorStateIfExists(dir);
   const state: SupervisorState = {
     status: isProcessAlive(pid) ? "running" : "stopped",
     startedAt: now,
     updatedAt: now,
     pid,
     supervisorId,
-    tickCount: 0,
-    lastTick: null,
+    tickCount: previousState?.tickCount ?? 0,
+    lastTick: previousState?.lastTick ?? null,
   };
   await writeSupervisorState(dir, state);
   await appendSupervisorEvent(dir, {

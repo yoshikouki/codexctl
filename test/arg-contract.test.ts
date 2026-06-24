@@ -36,6 +36,7 @@ import {
   runSupervisor,
   startSupervisor,
   stopSupervisor,
+  waitForSupervisor,
 } from "../src/supervisor.ts";
 
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
@@ -1836,6 +1837,171 @@ describe("supervisor", () => {
       const state = await readSupervisorState();
       expect(state.lastTick?.reconciliation).toBeNull();
       expect(state.supervisorId).toBeNull();
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("waitForSupervisor waits for ticks, actions, stopped state, and timeout", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+
+      const timeout = await waitForSupervisor({ intervalMs: 1, timeoutMs: 1 });
+      expect(timeout).toMatchObject({
+        ready: false,
+        reason: "timeout",
+        afterTick: 0,
+        state: null,
+        actions: [],
+      });
+
+      const tickWait = waitForSupervisor({ afterTick: 0, intervalMs: 1, timeoutMs: 1000 });
+      await runSupervisor({ intervalMs: 1, once: true });
+      expect(await tickWait).toMatchObject({
+        ready: true,
+        reason: "tick",
+        afterTick: 0,
+        actions: [],
+        state: {
+          tickCount: 1,
+        },
+      });
+
+      const stopped = await waitForSupervisor({ afterTick: 1, intervalMs: 1, timeoutMs: 10 });
+      expect(stopped).toMatchObject({
+        ready: true,
+        reason: "stopped",
+        afterTick: 1,
+        actions: [],
+      });
+
+      await createJob({ key: "supervisor-wait-action", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/supervisor-wait-action/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      await runSupervisor({ intervalMs: 1, once: true });
+      const actionWait = await waitForSupervisor({ intervalMs: 1, timeoutMs: 10 });
+      expect(actionWait.ready).toBe(true);
+      expect(actionWait.reason).toBe("actions");
+      expect(actionWait.actions.map((action) => action.kind)).toEqual(["inspect_error"]);
+
+      const cliActions = await runCli(["supervisor", "wait", "--after-tick", "0", "--interval-ms", "1", "--timeout-ms", "10", "--json"], tmp);
+      expect(cliActions.exitCode).toBe(0);
+      expect(JSON.parse(cliActions.stdout).reason).toBe("actions");
+
+      const staleActionWait = await waitForSupervisor({
+        afterTick: actionWait.state?.tickCount ?? 0,
+        intervalMs: 1,
+        timeoutMs: 1,
+      });
+      expect(staleActionWait).toMatchObject({
+        ready: true,
+        reason: "stopped",
+        actions: [],
+      });
+
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "running",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: 999_999_999,
+        supervisorId: "dead-supervisor",
+        tickCount: actionWait.state?.tickCount ?? 1,
+        lastTick: actionWait.state?.lastTick ?? null,
+      }));
+      const stale = await waitForSupervisor({
+        afterTick: actionWait.state?.tickCount ?? 1,
+        intervalMs: 1,
+        timeoutMs: 10,
+      });
+      expect(stale).toMatchObject({
+        ready: true,
+        reason: "stale",
+      });
+
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "running",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: process.pid,
+        supervisorId: "not-this-process",
+        tickCount: actionWait.state?.tickCount ?? 1,
+        lastTick: actionWait.state?.lastTick ?? null,
+      }));
+      const mismatch = await waitForSupervisor({
+        afterTick: 0,
+        intervalMs: 1,
+        timeoutMs: 10,
+      });
+      expect(mismatch).toMatchObject({
+        ready: true,
+        reason: "stale",
+        actions: [],
+      });
+
+      const cli = await runCli(["supervisor", "wait", "--after-tick", "0", "--interval-ms", "1", "--timeout-ms", "10", "--json"], tmp);
+      expect(cli.exitCode).toBe(0);
+      expect(JSON.parse(cli.stdout).reason).toBe("stale");
+
+      const badTick = await runCli(["supervisor", "wait", "--after-tick", "--json"], tmp);
+      expect(badTick.exitCode).toBe(2);
+      expect(JSON.parse(badTick.stderr).error).toEqual({
+        code: "invalid_flag",
+        message: "--after-tick must be a non-negative integer",
+      });
+    } finally {
+      process.chdir(cwd);
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("runSupervisor keeps tickCount monotonic across restarts for wait cursors", async () => {
+    const cwd = process.cwd();
+    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    try {
+      process.chdir(tmp);
+      await mkdir(".codexctl/supervisor", { recursive: true });
+      await Bun.write(".codexctl/supervisor/state.json", JSON.stringify({
+        status: "stopped",
+        startedAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z",
+        pid: null,
+        supervisorId: "previous-supervisor",
+        tickCount: 10,
+        lastTick: null,
+      }));
+      await createJob({ key: "supervisor-restart-action", repo: ".", prompt: "hello" });
+      const jobPath = ".codexctl/jobs/supervisor-restart-action/job.json";
+      const job = await Bun.file(jobPath).json();
+      job.status = "running";
+      job.workerPid = null;
+      job.threadId = "thread-1";
+      job.turnId = "turn-1";
+      await Bun.write(jobPath, JSON.stringify(job));
+
+      const state = await runSupervisor({ intervalMs: 1, once: true });
+      const result = await waitForSupervisor({ afterTick: 10, intervalMs: 1, timeoutMs: 10 });
+      expect(state.tickCount).toBe(11);
+      expect(result).toMatchObject({
+        ready: true,
+        reason: "actions",
+        afterTick: 10,
+        state: {
+          tickCount: 11,
+        },
+      });
+      expect(result.actions.map((action) => action.kind)).toEqual(["inspect_error"]);
+
+      const restarted = await runSupervisor({ intervalMs: 1, maxTicks: 2 });
+      expect(restarted.tickCount).toBe(13);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
