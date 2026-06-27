@@ -15,6 +15,7 @@ import {
   type JobRecoveryResult,
   type JobSummary,
 } from "./job.ts";
+import { stateEnvForChild, supervisorCursorDir, supervisorCursorPath, supervisorDir } from "./state.ts";
 
 const HISTORY_READ_CHUNK_BYTES = 64 * 1024;
 const WAIT_CANCEL_ATTENTION_MS = 60_000;
@@ -270,7 +271,7 @@ export type SupervisorActionApplication = {
 };
 
 export async function runSupervisor(options: SupervisorRunOptions): Promise<SupervisorState> {
-  const dir = supervisorDir(process.cwd());
+  const dir = supervisorDir();
   await mkdir(dir, { recursive: true });
   const previousState = await readSupervisorStateIfExists(dir);
   let stopRequested = false;
@@ -330,7 +331,7 @@ export async function runSupervisor(options: SupervisorRunOptions): Promise<Supe
 }
 
 export async function startSupervisor(options: SupervisorStartOptions): Promise<SupervisorStartResult> {
-  const dir = supervisorDir(process.cwd());
+  const dir = supervisorDir();
   await mkdir(dir, { recursive: true });
   return await withSupervisorLifecycleLock(dir, async () => {
     const existing = await readSupervisorStateIfExists(dir);
@@ -370,7 +371,10 @@ export async function startSupervisor(options: SupervisorStartOptions): Promise<
     const proc = Bun.spawn({
       cmd,
       cwd: process.cwd(),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...stateEnvForChild(),
+      },
       stdin: "ignore",
       stdout: Bun.file(join(dir, "supervisor.log")),
       stderr: Bun.file(join(dir, "supervisor.err.log")),
@@ -392,7 +396,7 @@ export async function startSupervisor(options: SupervisorStartOptions): Promise<
 }
 
 export async function stopSupervisor(options: SupervisorStopOptions = {}): Promise<SupervisorStopResult> {
-  const dir = supervisorDir(process.cwd());
+  const dir = supervisorDir();
   await mkdir(dir, { recursive: true });
   return await withSupervisorLifecycleLock(dir, async () => {
     const timeoutMs = options.timeoutMs ?? 5_000;
@@ -454,12 +458,12 @@ export async function stopSupervisor(options: SupervisorStopOptions = {}): Promi
 }
 
 export async function readSupervisorState(): Promise<SupervisorState> {
-  const state = await Bun.file(join(supervisorDir(process.cwd()), "state.json")).json() as SupervisorState;
+  const state = await Bun.file(join(supervisorDir(), "state.json")).json() as SupervisorState;
   return normalizeSupervisorState(state);
 }
 
 export async function readSupervisorEvents(): Promise<unknown[]> {
-  const file = Bun.file(join(supervisorDir(process.cwd()), "events.jsonl"));
+  const file = Bun.file(join(supervisorDir(), "events.jsonl"));
   if (!(await file.exists())) return [];
   return (await file.text())
     .split("\n")
@@ -468,7 +472,7 @@ export async function readSupervisorEvents(): Promise<unknown[]> {
 }
 
 export async function readSupervisorActionHistory(tickLimit = 10): Promise<SupervisorActionHistory> {
-  const { eventsScanned, ticks } = await readRecentSupervisorActionTicks(supervisorDir(process.cwd()), tickLimit);
+  const { eventsScanned, ticks } = await readRecentSupervisorActionTicks(supervisorDir(), tickLimit);
   const latest = ticks.at(-1) ?? null;
   return {
     at: new Date().toISOString(),
@@ -482,7 +486,7 @@ export async function readSupervisorActionHistory(tickLimit = 10): Promise<Super
 }
 
 export async function waitForSupervisor(options: SupervisorWaitOptions = {}): Promise<SupervisorWaitResult> {
-  const dir = supervisorDir(process.cwd());
+  const dir = supervisorDir();
   const afterTick = options.afterTick ?? 0;
   const intervalMs = options.intervalMs ?? 1000;
   const timeoutMs = options.timeoutMs ?? null;
@@ -523,7 +527,7 @@ export async function nextSupervisorAction(options: SupervisorNextOptions = {}):
 
 export async function readSupervisorInbox(options: SupervisorInboxOptions = {}): Promise<SupervisorInboxResult> {
   const cursor = options.cursor ? await readSupervisorCursor(options.cursor) : null;
-  const previousState = await readSupervisorStateIfExists(supervisorDir(process.cwd()));
+  const previousState = await readSupervisorStateIfExists(supervisorDir());
   const start = await startSupervisor({
     intervalMs: options.startIntervalMs ?? options.intervalMs ?? 1000,
     maxTicks: options.startMaxTicks,
@@ -559,7 +563,7 @@ export async function readSupervisorInbox(options: SupervisorInboxOptions = {}):
 
 export async function readSupervisorCursor(name: string): Promise<SupervisorCursor> {
   assertSupervisorCursorName(name);
-  const path = supervisorCursorPath(process.cwd(), name);
+  const path = supervisorCursorPath(name);
   const file = Bun.file(path);
   if (!(await file.exists())) {
     return { name, afterTick: 0, updatedAt: null };
@@ -574,8 +578,7 @@ export async function readSupervisorCursor(name: string): Promise<SupervisorCurs
 
 export async function ackSupervisorCursor(name: string, tick: number): Promise<SupervisorCursorAckResult> {
   assertSupervisorCursorName(name);
-  const root = process.cwd();
-  return await withSupervisorCursorLock(root, name, async () => {
+  return await withSupervisorCursorLock(name, async () => {
     const previous = await readSupervisorCursor(name);
     const now = new Date().toISOString();
     const cursor: SupervisorCursor = {
@@ -583,7 +586,7 @@ export async function ackSupervisorCursor(name: string, tick: number): Promise<S
       afterTick: Math.max(previous.afterTick, tick),
       updatedAt: now,
     };
-    const dir = supervisorCursorDir(root);
+    const dir = supervisorCursorDir();
     await mkdir(dir, { recursive: true });
     await writeJsonFileAtomic(join(dir, `${name}.json`), cursor);
     return { at: now, previous, cursor };
@@ -1177,8 +1180,8 @@ async function withSupervisorLifecycleLock<T>(dir: string, work: () => Promise<T
   throw new SupervisorOperationError("supervisor_locked", "Supervisor lifecycle state is locked by another writer");
 }
 
-async function withSupervisorCursorLock<T>(root: string, name: string, work: () => Promise<T>): Promise<T> {
-  const dir = supervisorCursorDir(root);
+async function withSupervisorCursorLock<T>(name: string, work: () => Promise<T>): Promise<T> {
+  const dir = supervisorCursorDir();
   await mkdir(dir, { recursive: true });
   const lockDir = join(dir, `${name}.lock`);
   for (let attempt = 0; attempt < SUPERVISOR_LOCK_ATTEMPTS; attempt++) {
@@ -1462,18 +1465,6 @@ async function writeJsonFileAtomic(path: string, value: unknown): Promise<void> 
   const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await Bun.write(tempPath, JSON.stringify(value, null, 2) + "\n");
   await rename(tempPath, path);
-}
-
-function supervisorDir(root: string): string {
-  return join(root, ".codexctl", "supervisor");
-}
-
-function supervisorCursorDir(root: string): string {
-  return join(supervisorDir(root), "cursors");
-}
-
-function supervisorCursorPath(root: string, name: string): string {
-  return join(supervisorCursorDir(root), `${name}.json`);
 }
 
 function isProcessAlive(pid: number | null): boolean {

@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import type { ReadableStreamDefaultReader as NodeReadableStreamDefaultReader } from "node:stream/web";
 
 export type JsonObject = Record<string, unknown>;
@@ -209,11 +208,6 @@ export async function readDaemonVersion(): Promise<JsonObject> {
     throw new Error(stderr || `codex app-server daemon version exited with ${exitCode}`);
   }
   return JSON.parse(stdout) as JsonObject;
-}
-
-export function jobDir(root: string, key: string): string {
-  assertJobKey(key);
-  return join(root, ".codexctl", "jobs", key);
 }
 
 export function assertJobKey(key: string): void {

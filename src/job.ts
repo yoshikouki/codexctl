@@ -1,7 +1,8 @@
 import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { AppServerClient, type AppServerEvent, jobDir } from "./app-server.ts";
+import { AppServerClient, type AppServerEvent } from "./app-server.ts";
 import { compactJobEvent, type CompactJobEvent } from "./events.ts";
+import { jobDir, jobsRoot, stateEnvForChild } from "./state.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -311,7 +312,7 @@ const JOB_RECORD_LOCK_ATTEMPTS = 80;
 export async function startJob(options: StartJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
   if (options.detach) {
-    const dir = jobDir(process.cwd(), record.key);
+    const dir = jobDir(record.key);
     return await spawnDetachedWorker(record, dir, "start");
   }
   return await runJobWorker(record.key);
@@ -331,7 +332,7 @@ export async function runJob(options: RunJobOptions): Promise<JobRunResult> {
 }
 
 export async function recoverJob(key: string, options: JobRecoveryOptions = {}): Promise<JobRecoveryResult> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   const record = await readJob(key);
   if (
     options.expectedRecoveryStateId
@@ -393,7 +394,7 @@ function shortStableHash(value: string): string {
 }
 
 export async function listJobs(): Promise<JobListItem[]> {
-  const root = jobsRoot(process.cwd());
+  const root = jobsRoot();
   const entries = await readJobRootEntries(root);
   const jobs = await Promise.all(entries
     .filter((entry) => entry.isDirectory())
@@ -461,7 +462,7 @@ export async function reconcileJobs(options: JobReconcileOptions = {}): Promise<
 }
 
 export async function removeJob(key: string, options: JobRemoveOptions = {}): Promise<JobRemoveResult> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   let status: JobStatus | "unreadable";
   let job: JobRecord | null = null;
   try {
@@ -521,7 +522,7 @@ export async function pruneJobs(options: JobPruneOptions = {}): Promise<JobPrune
 }
 
 export async function cancelJob(key: string): Promise<JobCancelResult> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   return await withJobRecordLock(dir, key, async () => {
     const job = await readPersistedJobRecord(dir, key);
     if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
@@ -607,8 +608,7 @@ export async function cancelJobAndWait(key: string, options: JobWaitOptions = {}
 
 export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
-  const root = process.cwd();
-  const dir = jobDir(root, options.key);
+  const dir = jobDir(options.key);
   await mkdir(dir, { recursive: true });
   return await withJobRecordLock(dir, options.key, async () => {
     const existingJob = Bun.file(`${dir}/job.json`);
@@ -684,6 +684,7 @@ async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "star
         cwd: process.cwd(),
         env: {
           ...process.env,
+          ...stateEnvForChild(),
           CODEXCTL_WORKER_ID: workerId,
           CODEXCTL_WORKER_GENERATION: String(workerGeneration),
         },
@@ -722,7 +723,7 @@ async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "star
 }
 
 export async function runJobWorker(key: string): Promise<JobRecord> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   const record = await readJob(key);
   record.status = "running";
   record.startedAt ??= new Date().toISOString();
@@ -830,12 +831,12 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 }
 
 export async function readJob(key: string): Promise<JobRecord> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   return await readPersistedJobRecord(dir, key);
 }
 
 export async function readJobEvents(key: string): Promise<unknown[]> {
-  const path = `${jobDir(process.cwd(), key)}/events.jsonl`;
+  const path = `${jobDir(key)}/events.jsonl`;
   const file = Bun.file(path);
   if (!(await file.exists())) return [];
   const text = await file.text();
@@ -925,7 +926,7 @@ export async function enqueueApprovalDecisionAndWait(
 }
 
 export async function enqueueSteer(key: string, prompt: string): Promise<TurnSteerCommand> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   const job = await readJob(key);
   if (job.status !== "running") {
     throw new Error(`Job '${key}' is ${job.status}; only running jobs can be steered`);
@@ -969,7 +970,7 @@ export async function enqueueApprovalDecision(
   approvalId: string,
   decision: ApprovalResolveCommand["decision"],
 ): Promise<ApprovalResolveCommand> {
-  const dir = jobDir(process.cwd(), key);
+  const dir = jobDir(key);
   const job = await readJob(key);
   if (job.status !== "running") {
     throw new Error(`Job '${key}' is ${job.status}; only running jobs can receive approval decisions`);
@@ -999,7 +1000,7 @@ export async function enqueueApprovalDecision(
 }
 
 export async function readNewEventLines(key: string, offset: number): Promise<{ lines: string[]; offset: number }> {
-  const path = `${jobDir(process.cwd(), key)}/events.jsonl`;
+  const path = `${jobDir(key)}/events.jsonl`;
   return await readNewCompleteLines(path, offset);
 }
 
@@ -1766,10 +1767,6 @@ async function readJobRootEntries(root: string) {
 
 function normalizeRepo(repo: string): string {
   return isAbsolute(repo) ? repo : resolve(process.cwd(), repo);
-}
-
-function jobsRoot(root: string): string {
-  return join(root, ".codexctl", "jobs");
 }
 
 function isProcessAlive(pid: number | null): boolean {

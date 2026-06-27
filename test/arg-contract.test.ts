@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
 import { compactJobEvent } from "../src/events.ts";
+import { codexctlHome, stateRoot } from "../src/state.ts";
 import {
   approvalResponseFor,
   cancelJob,
@@ -43,12 +44,15 @@ const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dir, "..");
 
 beforeEach(() => {
+  process.env.CODEXCTL_STATE_DIR = ".codexctl";
+  delete process.env.CODEXCTL_STATE_REPO;
   process.chdir(repoRoot);
 });
 
 async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, cliPath, ...args], {
     cwd,
+    env: process.env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -74,6 +78,22 @@ async function waitForSupervisorFixtureStop(root: string): Promise<void> {
 }
 
 describe("cli output contract", () => {
+  test("default state root lives under ~/.codexctl by repo identity", () => {
+    const previousStateDir = process.env.CODEXCTL_STATE_DIR;
+    const previousHome = process.env.CODEXCTL_HOME;
+    try {
+      delete process.env.CODEXCTL_STATE_DIR;
+      process.env.CODEXCTL_HOME = "/tmp/codexctl-home-test";
+      expect(codexctlHome()).toBe("/tmp/codexctl-home-test");
+      expect(stateRoot("/tmp/example-repo").startsWith("/tmp/codexctl-home-test/repos/example-repo-")).toBe(true);
+    } finally {
+      if (previousStateDir === undefined) delete process.env.CODEXCTL_STATE_DIR;
+      else process.env.CODEXCTL_STATE_DIR = previousStateDir;
+      if (previousHome === undefined) delete process.env.CODEXCTL_HOME;
+      else process.env.CODEXCTL_HOME = previousHome;
+    }
+  });
+
   test("inline flags preserve equals in values", () => {
     const args = parseArgs(["job", "start", "--key=inline-equals", "--prompt=a=b"]);
     expect(args.flags.get("key")).toBe("inline-equals");
