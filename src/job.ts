@@ -2,6 +2,7 @@ import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
 import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents } from "./events.ts";
+import { sendJobNotification } from "./notify.ts";
 import { jobDir, jobsRoot, stateEnvForChild } from "./state.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -486,13 +487,23 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   });
 
   const processedControlIds = new Set<string>();
-  const client = new AppServerClient(async (event) => {
-    await appendEvent(dir, event);
-    updateRecordFromEvent(record, event);
-    await writeWorkerJobRecord(dir, record);
-  });
-
+  const notifiedApprovals = new Set<string>();
+  let ownsRecord = true;
+  let client: AppServerClient | undefined;
   try {
+    client = new AppServerClient(async (event) => {
+      await appendEvent(dir, event);
+      updateRecordFromEvent(record, event);
+      await writeWorkerJobRecord(dir, record);
+      if (event.direction === "server" && "method" in event.message && "id" in event.message && isApprovalRequest(event.message.method)) {
+        const approvalId = String(event.message.id);
+        if (!notifiedApprovals.has(approvalId)) {
+          notifiedApprovals.add(approvalId);
+          await sendJobNotification(dir, record, "approval.requested", approvalId);
+        }
+      }
+    });
+
     await client.initialize();
     const threadResult = await client.request("thread/start", {
       cwd: record.repo,
@@ -522,6 +533,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     return record;
   } catch (error) {
     if (error instanceof StaleWorkerWriteError) {
+      ownsRecord = false;
       await appendEvent(dir, {
         direction: "worker",
         event: { type: "worker.stale", error: error.message },
@@ -537,6 +549,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
       await writeWorkerJobRecord(dir, record);
     } catch (writeError) {
       if (writeError instanceof StaleWorkerWriteError) {
+        ownsRecord = false;
         await appendEvent(dir, {
           direction: "worker",
           event: { type: "worker.stale", error: writeError.message },
@@ -548,13 +561,22 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     }
     throw error;
   } finally {
-    await client.close();
+    await client?.close();
+    if (ownsRecord && isTerminalStatus(record.status)) {
+      await sendJobNotification(dir, record, `job.${record.status}`);
+    }
     await appendEvent(dir, {
       direction: "worker",
       event: { type: "worker.exited", pid: process.pid, status: record.status },
       at: new Date().toISOString(),
     });
   }
+}
+
+export async function notifyJob(key: string) {
+  const result = await sendJobNotification(jobDir(key), await readJob(key), "job.status");
+  if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+  return result;
 }
 
 export async function readJob(key: string): Promise<JobRecord> {
@@ -1143,7 +1165,7 @@ function summarizeJob(job: JobRecord): JobListItem {
   };
 }
 
-function isTerminalStatus(status: JobStatus | "unreadable"): boolean {
+function isTerminalStatus(status: JobStatus | "unreadable"): status is "completed" | "failed" | "cancelled" {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 

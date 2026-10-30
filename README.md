@@ -2,6 +2,24 @@
 
 Agent-oriented CLI for controlling Codex app-server jobs.
 
+## Grok Bot notifications
+
+Set `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` in the environment before starting `job run`. The detached worker sends one JSON POST when it finishes (`job.completed`, `job.failed`, or `job.cancelled`) and one per approval ID (`approval.requested`). Without a URL, automatic notification is disabled. A configured URL without a key records `notify.failed` with `missing_key` and sends nothing.
+
+```sh
+codexctl job notify demo --json
+```
+
+This sends the current job as `job.status` once, including while an approval is pending, and returns `{ "ok": true }` on success. Failure returns a structured JSON error on stderr with a nonzero exit code; an unset URL returns `notify_not_configured`. Only automatic notifications originate from the detached worker; cancellation before a worker starts and failure to spawn a worker do not send automatically.
+
+Requests use `Content-Type: application/json` and `Authorization: Bearer <key>`. The body contains `source: "codexctl"`, `event`, `key`, `status`, `repo`, nullable `threadId` and `turnId`, an ISO `at` timestamp, and `finalResponse` truncated to 2,000 Unicode code points. Only `approval.requested` includes `approvalId`. Prompt, approval parameters, errors, and environment variables are omitted; exact occurrences of the notification URL/key are redacted from payload text. Job output should not contain other secrets: arbitrary secrets in model output cannot be identified automatically.
+
+The destination and key are read only from the environment, never stored by the notification code or included in its results/errors. Each request times out after 10 seconds, with no retry or redirect. HTTP 200 records `notify.sent`; other responses record `notify.failed` with only an HTTP status, and request failures record only an error category. Notification failures leave the job state unchanged. If the events file itself cannot be written, notification audit recording is best-effort. Manual notification uses the invoking process's environment.
+
+The [official Grok Bot webhook documentation](https://docs.x.ai/grok-bot/skills-routines-and-automations#webhooks) specifies Bearer authentication, optional JSON, and HTTP 200 as acceptance (not completion of the Bot's run). This matches the transport above; the body fields are codexctl's contract. The separate Grok Automations webhook signature format is not used here. No live Grok Bot endpoint is used in tests.
+
+The older sections below still describe features removed in step 1; use `codexctl --help` for the current command set until the step 3 documentation rewrite.
+
 ## Agent Skill
 
 This repository includes an Agent Skill at [`skills/codexctl/`](skills/codexctl/) so other AI agents can discover `codexctl` when a user asks to delegate work to another Codex/app-server job.

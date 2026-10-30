@@ -7,6 +7,7 @@ import {
   enqueueSteer,
   enqueueSteerAndWait,
   listJobs,
+  notifyJob,
   readApproval,
   readApprovals,
   readJobEvents,
@@ -77,6 +78,13 @@ export async function main(argv: string[]): Promise<void> {
       intervalMs: intervalMsFlag(args),
       timeoutMs: numberFlag(args, "timeout-ms"),
     }));
+    return;
+  }
+
+  if (resource === "job" && action === "notify" && key) {
+    requirePositionalCount(args, 3);
+    allowFlags(args, ["json"]);
+    await printJson(await notifyJob(key));
     return;
   }
 
@@ -323,6 +331,7 @@ function requireJsonForPublicCommand(args: Args): void {
 function usageText(): string {
   return `Usage:
   codexctl job run --repo . --key <key> --prompt <prompt> [--force] [--events <n>] [--timeout-ms <ms>] --json
+  codexctl job notify <key> --json
   codexctl job list --json
   codexctl job summary <key> [--events <n>] --json
   codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
