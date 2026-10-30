@@ -1,63 +1,29 @@
 ---
 name: codexctl
-description: Use codexctl to delegate work to another Codex/app-server job and monitor it as structured JSON. Trigger when the user asks to "ask another agent", "delegate to another Codex", "run a background Codex job", "dogfood codexctl", "review this with another agent", "start/wait/inspect a Codex job", or build/operate an AI-agent controller around Codex app-server.
+description: 別の Codex に作業を委任する、バックグラウンドで実行する、複数の Codex ジョブを確認する依頼に使う。インストール済み Codex の app-server を codexctl 経由で操作する。
 ---
 
 # codexctl
 
-Use `codexctl` as the job-oriented control surface for Codex app-server.
+codexctl は Codex の薄い制御レイヤーです。サンドボックスと承認は `~/.codex/config.toml` を含む Codex 自身の設定に従います。Codex の設定を変更しないでください。
 
-Prefer it when the user wants another agent to work independently, review a diff, run a background task, or when you need a structured JSON controller loop over Codex jobs.
+## 始める
 
-## First Checks
-
-1. Locate the repository or installed binary.
-2. Run `codexctl doctor --json` before starting work.
-3. Use `codexctl --help` and the repository's `docs/codexctl-agent-contract.md` as command truth sources.
-4. Keep this skill as workflow guidance only; do not copy long command catalogs here.
-
-If `codexctl` is not installed or the repository is not available, read [references/setup.md](references/setup.md).
-
-## Delegate Work
-
-For "ask another agent" style requests, create a stable job key and run one background job:
+1. `codexctl --help` でコマンドを確認する。CLI がなければ [setup.md](references/setup.md) を読む。
+2. ジョブの key を決め、プロンプトに目的・対象・変更の可否・制約・期待する報告を含める。
+3. 編集を並列に行うときは、ジョブごとに worktree を用意する。[workflows.md](references/workflows.md) を参照する。
 
 ```sh
-codexctl job run --repo . --key <safe-key> --prompt "<task>" --events 0 --timeout-ms 600000 --json
+codexctl job run --repo . --key review --prompt "このリポジトリをレビューして問題点を報告してください。ファイルは変更しないでください。"
+codexctl job wait review --timeout-ms 600000
 ```
 
-Read the returned `wait` object.
+`job run` は queued レコードを返します。待機結果は `job wait` から読みます。
 
-- If terminal, summarize `wait.summary.finalResponse` or `wait.summary.error`.
-- If `approval_required`, inspect approvals and ask/resolve explicitly; do not auto-approve risky work.
-- If timeout, use `codexctl job summary <key> --events 10 --json` or `codexctl job wait <key> --json`.
+- `reason: "terminal"`: `summary.status` と `summary.finalResponse` または `summary.error` を確認して報告する。
+- `reason: "approval_required"`: `approval list` で内容を確認し、ユーザーの指示や承認方針に従って判断する。無条件に承認しない。
+- `reason: "timeout"`: ジョブは継続する。`job summary` で状態を確認するか、再度 `job wait` で待つ。
 
-Use `--force` only when you intentionally replace a non-live job record with the same key.
+状態は `~/.codexctl/jobs/<key>/`、または `CODEXCTL_HOME` 配下の `jobs/<key>/` にあります。終了済みジョブには `job steer` で同じ thread の続きを依頼できます。`threadId` がない場合は新規ジョブにします。
 
-## Monitor Many Jobs
-
-For controller or dogfooding workflows, use the supervisor inbox rather than polling individual jobs:
-
-```sh
-codexctl supervisor inbox --cursor <name> --limit 5 --timeout-ms 600000 --json
-```
-
-Process every returned `items[]` entry before acknowledging.
-
-Only run the returned `ack.command`, or equivalent `codexctl supervisor ack <name> --tick <n> --json`, when `hasMore` is false and every returned item has been handled.
-
-Never treat `ack` as action resolution. It only records a local tick receipt.
-
-## Safety Boundaries
-
-- Do not execute `nextCommand` blindly; inspect the action first.
-- Do not auto-approve permissions, file changes, or commands unless the user or a written policy explicitly allows it.
-- Prefer read-only supervisor commands for diagnosis.
-- Use `supervisor apply` only with the documented confirmation token and only for supported mutations.
-- Keep job prompts self-contained: include repo path, exact task, constraints, and expected output.
-
-## References
-
-- Setup and update paths: [references/setup.md](references/setup.md)
-- Controller patterns and handoff workflow: [references/workflows.md](references/workflows.md)
-
+通知は `CODEXCTL_GROK_BOT_NOTIFY_URL` と `CODEXCTL_GROK_BOT_NOTIFY_KEY` を環境変数から読むだけです。値を文書やプロンプトに書かないでください。通知の詳細と JSON 出力はリポジトリの [README](../../README.md#通知) と [契約文書](../../docs/codexctl-agent-contract.md) を参照してください。

@@ -1,125 +1,66 @@
 # codexctl
 
-Agent-oriented CLI for controlling Codex app-server jobs.
+インストール済みの Codex を app-server 経由で動かす、薄い制御レイヤーです。ジョブをバックグラウンドで実行し、JSON で状態を確認したり、追加指示や承認を送ったりできます。
 
-Current state, output and resume behavior: [step 2b contract](docs/thin-layer-step2b.md).
+サンドボックスと承認は `~/.codex/config.toml` を含む Codex 自身の設定に従います。codexctl は Codex のコードや設定を書き換えず、モデル・ネットワーク・認証の設定も上書きしません。
 
-## Grok Bot notifications
+## 実行する
 
-Set `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` in the environment before starting `job run`. The detached worker sends one JSON POST when it finishes (`job.completed`, `job.failed`, or `job.cancelled`) and one per approval ID (`approval.requested`). Without a URL, automatic notification is disabled. A configured URL without a key records `notify.failed` with `missing_key` and sends nothing.
-
-```sh
-codexctl job notify demo
-```
-
-This sends the current job as `job.status` once, including while an approval is pending, and returns `{ "ok": true }` on success. Failure returns a structured JSON error on stderr with a nonzero exit code; an unset URL returns `notify_not_configured`. Only automatic notifications originate from the detached worker; a queued cancellation sends when the worker processes it; failure to spawn a worker does not send automatically.
-
-Requests use `Content-Type: application/json` and `Authorization: Bearer <key>`. The body contains `source: "codexctl"`, `event`, `key`, `status`, `repo`, nullable `threadId` and `turnId`, an ISO `at` timestamp, and `finalResponse` truncated to 2,000 Unicode code points. Only `approval.requested` includes `approvalId`. Prompt, approval parameters, errors, and environment variables are omitted; exact occurrences of the notification URL/key are redacted from payload text. Job output should not contain other secrets: arbitrary secrets in model output cannot be identified automatically.
-
-The destination and key are read only from the environment, never stored by the notification code or included in its results/errors. Each request times out after 10 seconds, with no retry or redirect. HTTP 200 records `notify.sent`; other responses record `notify.failed` with only an HTTP status, and request failures record only an error category. Notification failures leave the job state unchanged. If the events file itself cannot be written, notification audit recording is best-effort. Manual notification uses the invoking process's environment.
-
-The [official Grok Bot webhook documentation](https://docs.x.ai/grok-bot/skills-routines-and-automations#webhooks) specifies Bearer authentication, optional JSON, and HTTP 200 as acceptance (not completion of the Bot's run). This matches the transport above; the body fields are codexctl's contract. The separate Grok Automations webhook signature format is not used here. No live Grok Bot endpoint is used in tests.
-
-The older sections below still describe features removed in step 1; use `codexctl --help` for the current command set until the step 3 documentation rewrite.
-
-## Agent Skill
-
-This repository includes an Agent Skill at [`skills/codexctl/`](skills/codexctl/) so other AI agents can discover `codexctl` when a user asks to delegate work to another Codex/app-server job.
-
-Install or update it with your skill manager rather than copying installed files by hand:
+Bun と app-server を利用できる Codex が必要です。リポジトリからの起動は次のとおりです。
 
 ```sh
-npx skills add yoshikouki/codexctl --skill codexctl
-npx skills update codexctl
+bun run src/cli.ts --help
+bun run src/cli.ts job run --repo . --key demo --prompt "このリポジトリの構成を説明してください。ファイルは変更しないでください。"
+bun run src/cli.ts job wait demo --timeout-ms 600000
 ```
 
-The skill intentionally stays thin. Use `codexctl --help` and [`docs/codexctl-agent-contract.md`](docs/codexctl-agent-contract.md) as command truth sources.
+`job run` は detached worker を起動し、`queued` レコードをすぐ返します。`job wait` は終了・承認待ち・タイムアウトのいずれかで返ります。CLI をインストール済みなら、`bun run src/cli.ts` の代わりに `codexctl` を使えます。
 
-This repository starts with a small Bun-based proof of concept. Non-help public commands require `--json` so agent callers can depend on a stable output mode:
+出力は JSON、エラーは stderr の JSON です。`job events` は保存済みイベントを raw JSONL で出力します。コマンドと出力の一覧は [エージェント向け契約](docs/codexctl-agent-contract.md) にあります。
 
-- `codexctl doctor --json` checks the local Codex app-server daemon.
-- `codexctl job start --repo . --key demo --prompt "..." --json` runs a Codex turn through `codex app-server --stdio`.
-- `codexctl job start --detach --repo . --key demo --prompt "..." --json` starts a detached worker.
-- `codexctl job run --repo . --key demo --prompt "..." --timeout-ms 600000 --json` starts a detached worker and waits for an actionable summary.
-- `codexctl job start --approval-policy untrusted ...` asks app-server to route more actions through approval.
-- `codexctl job start --sandbox read-only ...` overrides the app-server sandbox mode for that job.
-- `codexctl job list --json` summarizes local job records with next actions and worker health.
-- `codexctl job summary demo --events 10 --json` reads the job state, next action, final response, actionable approvals, diagnostics, and recent compact events.
-- `codexctl job wait demo --timeout-ms 600000 --json` waits until a job is terminal or approval is required, then returns a summary.
-- `codexctl job watch demo --format compact --json` follows a compact lifecycle stream until the job is terminal.
-- `codexctl job watch demo --format raw --json` follows the raw persisted app-server event log.
-- `codexctl job steer demo --prompt "..." --wait --json` appends a steering command for the worker, then waits for the next actionable summary.
-- `codexctl job cancel demo --wait --json` interrupts an active turn or cancels a queued job, then waits for the result.
-- `codexctl job rm demo --json` removes a terminal local job record.
-- `codexctl job prune --keep 10 --dry-run --json` previews completed job record cleanup.
-- `codexctl job recover demo --json` reconciles a queued or stale running job.
-- `codexctl job sweep --json` reconciles all queued or running local jobs.
-- `codexctl job reconcile --dry-run --json` reports supervisor-style worker lifecycle decisions without applying them.
-- `codexctl approval list demo --json` lists pending approval requests.
-- `codexctl approval approve demo <approval-id> --json` resolves a pending approval.
-- `codexctl approval approve demo <approval-id> --wait --json` resolves an approval, then waits for the next actionable summary.
-- `codexctl supervisor plan --json` returns recommended next actions without executing them.
-- `codexctl supervisor start --interval-ms 1000 --json` starts the supervisor loop in the background.
-- `codexctl supervisor stop --json` asks the detached supervisor loop to stop.
-- `codexctl supervisor actions --ticks 10 --json` reads recent supervisor action history.
-- `codexctl supervisor wait --after-tick 10 --timeout-ms 600000 --json` waits for supervisor actions, a new tick, stopped state, or timeout.
-- `codexctl supervisor next --after-tick 10 --timeout-ms 600000 --json` starts the supervisor if needed, waits for the next signal, and inspects the highest-severity action.
-- `codexctl supervisor inbox --after-tick 10 --timeout-ms 600000 --limit 5 --json` starts the supervisor if needed, waits for the next signal, and inspects fresh actions as a batch.
-- `codexctl supervisor ack default --tick 42 --json` stores a local supervisor cursor after a controller processes an inbox result.
-- `codexctl supervisor inspect demo --kind inspect_error --action-id <id> --json` resolves one current supervisor action into typed read-only inspection data.
-- `codexctl supervisor apply demo --kind inspect_dead_worker --action-id <id> --confirm recover-dead-worker --json` applies the one supported mutating supervisor action after an explicit confirmation token.
-- `codexctl supervisor run --interval-ms 1000 --json` keeps sweeping queued or running jobs.
-- `codexctl job result demo --json` reads the persisted result.
-- `codexctl job events demo --json` streams the persisted event log.
+## 状態と追加指示
 
-`job events` and `job watch` default to `--format raw` for full-fidelity replay. Use `--format compact` when an agent or human only needs lifecycle events such as thread/turn start, command execution, approval requests, warnings, app-server errors, completed assistant messages, and turn completion.
+状態は `~/.codexctl/jobs/<key>/` に保存します。`CODEXCTL_HOME` を指定すると、その配下の `jobs/<key>/` を使います。key は同じ home 内で一意です。作業ディレクトリを移動しても同じ key を参照できます。
 
-`job summary` is the quickest post-run view for agents: it returns the current job record, `nextAction`, worker health, pending and actionable approvals, approval counts, final response, error, diagnostics aggregated across compact events, and the most recent compact events. Use `--events 0` when the caller wants the stable summary fields without the event tail.
-
-`job wait` polls `job summary` and returns one JSON object instead of streaming events. It stops when the job reaches a terminal status or when `nextAction` becomes `resolve_approval`, so agents can either read the final result or handle an approval without replaying logs. `--timeout-ms <ms>` bounds the wait and returns `ready: false`, `reason: "timeout"`, and the current summary; timeout is a poll result, not a structured error.
-
-`job run` is the one-command orchestration path for agents. It creates or replaces a job using the same options as `job start --detach`, then runs the same wait logic as `job wait`. The response includes `started` for the spawned worker record and `wait` for the actionable summary result. It does not auto-approve requests; if the wait result is `reason: "approval_required"`, use the approval commands and then `job wait` again.
-
-`approval approve --wait` and `approval reject --wait` enqueue an explicit approval decision, then wait again for a terminal job, a new approval, or timeout. The wait ignores the approval ID it just enqueued so it does not immediately return the same pre-worker pending approval while the worker is still processing `control.jsonl`.
-
-`job steer --wait` and `job cancel --wait` use the same `job wait` result shape after appending their control command. `steer --wait` returns `{ command, wait }`; `cancel --wait` returns `{ cancel, wait }`. The wait does not make steering or cancellation synchronous at the app-server transport level: timeout remains a normal `ready: false` poll result, and approval requests still return through `wait.reason: "approval_required"`.
-
-The current PoC supports both synchronous `job start` and detached `job start --detach`. Jobs record state under `~/.codexctl/repos/<repo-id>/jobs/`, where `<repo-id>` is derived from the command's working directory. Existing job records in the active state root are preserved unless `--force` is passed. Set `CODEXCTL_HOME` to change the home directory, or `CODEXCTL_STATE_DIR` to use an explicit state root such as `.codexctl` for local dogfood runs, tests, or access to pre-home-directory records.
-
-`job cancel` marks queued jobs as `cancelled` immediately. For running jobs, it appends a `turn.interrupt` control command once; repeated cancel requests return `already_requested`. While the interrupt is pending, `job summary` returns `nextAction: "wait_cancel"` with `cancelRequestedAt` and `cancelCommandId`. The active worker sends app-server `turn/interrupt` on the same stdio connection and the job becomes `cancelled` when app-server completes the turn as interrupted. If the worker is already gone for an in-flight app-server turn, cancel marks the job failed instead of queuing an unreachable interrupt.
-
-Running workers refresh `worker-heartbeat.json`, which is overlaid onto job reads as `workerHeartbeatAt` when the heartbeat belongs to the current job and worker incarnation. Job records expose `jobIncarnation`, `workerId`, and `workerGeneration`; each job creation gets a new job incarnation, and each detached start or recovery creates a new worker identity so stale heartbeat files from an older job or worker cannot make a newer job look healthy. Worker spawn and worker writes share a per-job record lock, and worker writes verify that their job and worker identity still match the persisted current record before updating `job.json` or heartbeat state. `job list` exposes the last heartbeat and whether the worker PID is alive; `job status` and `job summary.workerHealth` also expose whether the heartbeat is stale and the reason. Heartbeat staleness is an observation signal for agents and supervisors; it is not yet an automatic kill or replay policy.
-
-`supervisor plan` is time-aware for stuck-looking states. Every action includes a stable `id` derived from its job and action identity; error and unreadable actions include a short reason hash so callers can distinguish changed failure causes, and dead-worker actions include a short job-state fingerprint so stale apply IDs do not match a later dead-worker state. Waiting cancellation actions include `ageMs` and move from `info` to `attention` after 60 seconds and to `critical` after 5 minutes. Stale worker actions include heartbeat `ageMs` and become `critical` after 5 minutes. During `supervisor run`, actions also include `firstSeenAt`, `seenTicks`, and `criticalSeenTicks` when the same concrete recommendation is observed in adjacent ticks, so callers can tell whether it is persistent. Critical actions may include a non-mutating `policy` recommendation such as `inspect`, or `escalate` when a critical finding itself persists for 3 ticks. These are still recommendations only; `nextCommand` is not auto-executed.
-
-`job reconcile` is the typed worker lifecycle primitive underneath `job sweep` and supervisor ticks. It reports active or unreadable jobs, the recovery-state fingerprint that would be used as a precondition, the lifecycle decision (`restart_queued`, `restart_before_thread`, `fail_in_flight_dead_worker`, `skip_worker_alive`, or `skip_unreadable`), and whether the decision was applied. Use `--dry-run` when an agent wants to inspect supervisor behavior without spawning workers or marking dead in-flight turns failed.
-
-`supervisor actions` reads the append-only supervisor event log and returns the most recent tick action history. It does not sweep jobs, run policy, or mutate state. Use `--ticks <n>` to bound how much history a controller reads before deciding whether to inspect, escalate, or keep waiting. Historical events written before action IDs existed are normalized with best-effort IDs when read; legacy dead-worker IDs cannot fully reconstruct the newer job-state fingerprint.
-
-`supervisor wait` polls supervisor state and returns one JSON object when current actions from a tick newer than `--after-tick <n>` are present, a newer tick appears, the supervisor is stale or stopped, or the timeout is reached. It returns `ready`, `reason: "actions" | "tick" | "stale" | "stopped" | "timeout"`, timing fields, the observed `state`, and fresh `actions`. Supervisor `tickCount` is preserved across supervisor restarts, so `--after-tick` can be used as a simple monotonic cursor. It is read-only and does not run reconciliation itself; pair it with `supervisor start` when a controller wants a long-lived background loop.
-
-`supervisor next` is the controller shortcut for `start` + `wait` + read-only inspection. It starts the detached supervisor loop when needed, waits from the supplied `--after-tick` or the state cursor observed before starting, selects the highest-severity fresh action while preserving supervisor order within the same severity, and returns its inspection payload. The selected action comes from the wait result instead of re-planning, so normal races between wait and inspection return a stable JSON result rather than a stale-action CLI error. It does not apply actions, resolve approvals, cancel jobs, or execute `nextCommand`.
-
-`supervisor inbox` is the batch form of `supervisor next`. It starts the detached supervisor if needed, waits from the supplied cursor or the pre-start state cursor, sorts all fresh actions by severity while preserving supervisor order within each severity, and returns `{ action, inspection }` items. Use `--limit <n>` to bound the batch size. Pass `--cursor <name>` to persist a controller-local `afterTick` cursor under the repo-scoped supervisor cursor directory; the response includes `totalActions`, `hasMore`, and an `ack` command only when all fresh actions are included. It shares the same read-only inspection behavior as `next` and does not apply actions, resolve approvals, cancel jobs, or execute `nextCommand`.
-
-`supervisor ack <cursor-name> --tick <n>` stores a local controller cursor for later `supervisor inbox --cursor <cursor-name>` calls. It only records the highest processed supervisor tick and never regresses an existing cursor. It does not mark individual actions resolved, hide persistent actions, mutate jobs, or affect supervisor reconciliation.
-
-`supervisor start` runs the same loop as `supervisor run`, but detached in the background with logs under the repo-scoped supervisor directory. It records a `supervisorId` in state and passes the same identity to the child process before returning, so `supervisor stop` can target the launch that `start` reported. Start/stop state transitions are serialized by the repo-scoped `supervisor/lifecycle.lock`, with a lock heartbeat for stale-lock recovery, so concurrent starts converge on one recorded supervisor. It does not change supervisor policy behavior. `supervisor stop` verifies that the recorded pid still looks like that detached supervisor before sending `SIGTERM`, then waits briefly for state to become stopped; stale pid state is marked stopped instead of killing anything else. If a live pid cannot be verified, start/stop fail with `supervisor_identity_unverified` rather than spawning a duplicate or pretending the loop stopped.
-
-`supervisor inspect` checks the current supervisor plan for a specific `jobKey` and action `kind`, then returns typed read-only inspection data. Pass `--action-id <id>` to require an exact current action match. Approval actions return pending approvals, most inspection actions return `job summary`, and unreadable job actions return the plan error without trying to parse the broken job record. It does not execute the `nextCommand` shell string, resolve approvals, recover jobs, or mutate state.
-
-`supervisor apply` is the explicit gate for mutating supervisor actions. The only supported mutation is applying a current `inspect_dead_worker` action by running the same recovery logic as `job recover`. Pass `--action-id <id>` to require an exact current action match before applying. It requires `--confirm recover-dead-worker`; without that token it fails with `supervisor_confirmation_required`. Use `--dry-run` to return the current action and required confirmation without mutating state. If the job state changes between validation and recovery, the recovery precondition rejects the mutation with `job_state_changed`. It does not approve requests, cancel jobs, delete records, or act on stale-but-live workers.
-
-`job rm` and `job prune` only clean repo-scoped codexctl job records; they do not delete Codex app-server thread history. `job rm` removes terminal jobs by default. `--force` can remove unreadable or inactive non-terminal local records, but refuses any job with a live worker. `job prune --keep <n>` removes older completed jobs after keeping the newest `n`; use `--status terminal` only when failed and cancelled debugging records should also be eligible. Use `--dry-run` to inspect first.
-
-When a `--json` command fails, `codexctl` writes a structured error to stderr:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "usage_error",
-    "message": "Missing required --prompt"
-  }
-}
+```sh
+codexctl job summary demo --events 0
+codexctl job steer demo --prompt "設定ファイルについても説明してください。" --wait --timeout-ms 600000
 ```
+
+`completed`・`failed`・`cancelled` のジョブへの `steer` は、同じ `threadId` で新しい turn を開始します。`threadId` がないジョブは再開できないため、新しい key で作成します。
+
+## worktree で並列作業する
+
+ジョブごとに `~/src/worktrees/github.com/<owner>/<repo>/<key>` とブランチ `codex/<key>` を用意し、そのパスを `--repo` に渡します。worktree は呼び出し側が Git で作成します。
+
+このリポジトリで、未使用の key とブランチを使う例です。
+
+```sh
+mkdir -p "$HOME/src/worktrees/github.com/yoshikouki/codexctl"
+git worktree add -b codex/docs-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" HEAD
+git worktree add -b codex/tests-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" HEAD
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" --key docs-review --prompt "文書をレビューし、不一致を報告してください。変更はしないでください。"
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" --key tests-review --prompt "テストをレビューし、不足を報告してください。変更はしないでください。"
+codexctl job list
+codexctl job wait docs-review --timeout-ms 600000
+codexctl job wait tests-review --timeout-ms 600000
+```
+
+## 通知
+
+`CODEXCTL_GROK_BOT_NOTIFY_URL` と `CODEXCTL_GROK_BOT_NOTIFY_KEY` は環境変数から読むだけで、通知処理は保存しません。自動通知は worker が起動時に引き継いだ環境、`job notify` は呼び出し元の環境を使います。
+
+- worker が終了状態に達すると `job.completed`・`job.failed`・`job.cancelled` を送ります。再開後の終了も対象です。
+- 承認要求では worker 内の承認 ID ごとに一度 `approval.requested` を送ります。
+- `codexctl job notify demo` は現在の状態を `job.status` として一度送ります。
+- URL がなければ自動通知は無効です。URL があって key がなければ送信せず、`missing_key` を記録します。
+
+JSON POST に `Content-Type: application/json` と Bearer 認証を使います。payload は `source: "codexctl"`、`event`、`key`、`status`、`repo`、`threadId`、`turnId`、ISO 時刻の `at`、`finalResponse` です。`threadId` と `turnId` は null の場合があります。`finalResponse` は最大 2,000 Unicode コードポイントで、`approval.requested` だけに `approvalId` を加えます。
+
+prompt・承認の params・error・環境変数は payload に含めません。通知 URL/key と一致する文字列は伏せますが、それ以外の秘密情報を自動判別する機能はありません。
+
+送信は10秒で打ち切り、再送もリダイレクト追従もしません。HTTP 200 を成功として `notify.sent`、失敗を `notify.failed` に記録します。通知失敗でジョブの状態は変わりません。イベントの記録自体に失敗した場合は記録を省略します。起動前のキャンセルも worker が処理すると通知しますが、worker の起動失敗では自動通知しません。
+
+## エージェント向けスキル
+
+[skills/codexctl/SKILL.md](skills/codexctl/SKILL.md) に委任・承認・再開の手順があります。スキルの管理ツールには `skills/codexctl/` を指定してください。
