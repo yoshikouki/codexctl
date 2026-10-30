@@ -13,6 +13,7 @@ beforeEach(async () => {
   env = { ...process.env };
   tmp = await realpath(await mkdtemp("/tmp/codexctl-lifecycle-"));
   for (const name of ["a", "b", "bin"]) await mkdir(join(tmp, name));
+  process.env.HOME = tmp;
   process.env.CODEXCTL_HOME = join(tmp, "state");
   delete process.env.CODEXCTL_RESUME_COMMAND_ID;
   notifications = [];

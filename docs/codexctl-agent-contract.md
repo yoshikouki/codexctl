@@ -74,6 +74,10 @@ For `item/permissions/requestApproval`, the requested permissions are returned u
 
 The caller creates each worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and passes it to `job run` with `--repo`. Start each job, then check results with `job list` and `job wait` for each key.
 
-codexctl only reads `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` from the environment and never stores them. Automatic notifications use the environment of the process that starts the worker: `job run`, or `job steer` on a finished job, which restarts the worker. `job notify` uses the caller's environment.
+Every CLI invocation and worker loads `~/.config/codexctl/env` by default, using `$HOME`. Set `env_file = "path/to/env"` in `~/.config/codexctl/config.toml` to override it; `~` expands to `$HOME` and relative paths resolve against the config directory. Existing environment variables win; missing files are ignored. Protect the env file with `chmod 600`.
+
+The env file accepts `KEY=VALUE`, blank lines, and `#` comments; surrounding single or double quotes are stripped. No `export`, variable expansion, or multiline values. Invalid or unreadable files fail with a JSON error; unknown config keys are rejected.
+
+codexctl reads `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` from the loaded environment and never stores them. Automatic notifications use the environment of the process that starts the worker: `job run`, or `job steer` on a finished job, which restarts the worker. `job notify` uses the caller's environment.
 
 See [Notifications in the README](../README.md#notifications) for notification triggers, payloads, the 10-second timeout, and the no-retry policy.
