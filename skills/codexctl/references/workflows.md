@@ -1,89 +1,31 @@
-# codexctl Agent Workflows
+# ジョブの操作
 
-Use this reference for concrete orchestration patterns. Verify exact flags with `codexctl --help` before relying on them.
+## worktree で並列実行する
 
-## One-off Delegation
+1. 未使用の key を決める。同じ `CODEXCTL_HOME` 内ではリポジトリが違っても key を重複させない。
+2. Git で `~/src/worktrees/github.com/<owner>/<repo>/<key>` に worktree を作り、ブランチ名を `codex/<key>` にする。
+3. worktree のパスを `job run` の `--repo` に渡す。プロンプトには目的・制約・変更の可否・期待する報告を書く。
+4. 各ジョブを開始してから `job list` と各 key の `job wait` で確認する。作成例は [README](../../../README.md#worktree-で並列作業する) を参照する。
 
-Use when the user asks for another agent to review, investigate, or work independently.
-
-```sh
-codexctl job run \
-  --repo . \
-  --key <task-key> \
-  --prompt "<self-contained task>" \
-  --events 0 \
-  --timeout-ms 600000 \
-  --json
-```
-
-Good prompts include:
-
-- current repository path
-- exact goal
-- constraints and files to inspect
-- whether edits are allowed
-- expected final output
-
-After the job returns:
-
-- summarize terminal results to the user
-- inspect `approval_required` jobs before resolving
-- keep the job key for follow-up `job summary`, `job wait`, or `job steer`
-
-## Dogfood Review
-
-Use when changing `codexctl` itself.
+## 承認を確認する
 
 ```sh
-codexctl job run \
-  --force \
-  --repo . \
-  --key dogfood-<topic>-review \
-  --prompt "Review the current uncommitted codexctl diff. Focus only on severe correctness bugs. If no severe findings, say No severe findings." \
-  --events 0 \
-  --timeout-ms 300000 \
-  --json
+codexctl approval list review
 ```
 
-If the review finds severe issues, fix them and run a second dogfood review with a new key.
+返された `id` を選び、`approval show` で `method` と `params` を確認します。承認判断は `approval approve` または `approval reject` で送ります。`--wait` を付けると別の承認か終了まで待ちます。permissions 承認への reject/cancel はエラーです。利用者の指示や承認方針が不明なら、判断を利用者に確認してください。
 
-If app-server returns usage limits or auth errors, record the blocker and inspect it through supervisor inbox if relevant.
+## 追加指示・中断・削除
 
-## Inbox Controller
-
-Use for multiple jobs or long-running background supervision.
+以下は、作成済みの `review` ジョブに対する操作例です。必要な操作だけ実行してください。
 
 ```sh
-codexctl supervisor inbox --cursor default --limit 5 --timeout-ms 600000 --json
+codexctl job summary review --events 5
+codexctl job steer review --prompt "最も重要な問題に絞って報告してください。" --wait --timeout-ms 600000
+codexctl job cancel review --wait --timeout-ms 600000
+codexctl job rm review --dry-run
 ```
 
-For each `items[]` entry:
+終了済みへの steer は、同じ thread で新しい turn を開始します。`threadId` がなければ、新しい key でジョブを作成してください。cancel の返却は割り込み受付であり、完了は待機結果で確認します。worker がいなければ制御コマンドは処理されません。
 
-1. read `action.kind`, `action.severity`, and `inspection`
-2. decide whether to inspect further, ask the user, or run an explicit command
-3. avoid automatic mutation unless a written policy allows it
-
-When `hasMore` is false and all returned items have been handled:
-
-```sh
-codexctl supervisor ack default --tick <ack.tick> --json
-```
-
-When `hasMore` is true, call inbox again before acknowledging.
-
-## Continuing From a Handoff
-
-When a user points to a handoff or issue:
-
-1. Read the referenced handoff document.
-2. Verify current state with Git and tests.
-3. Read `docs/codexctl-agent-contract.md` for the command contract.
-4. Use `codexctl` itself for dogfood review where possible.
-5. Commit logical slices.
-
-Current handoff document at the time this skill was created:
-
-```text
-docs/2026-06-24-progress-handoff.md
-```
-
+`job rm` はジョブの状態を削除します。worktree の削除や変更の統合は、呼び出し側で別に判断してください。
