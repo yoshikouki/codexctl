@@ -5,8 +5,8 @@ import { dirname, join, resolve } from "node:path";
 class EnvFileError extends Error {
   readonly code = "env_file_error";
 
-  constructor(path: string, line: number, reason: string) {
-    super(`${path}:${line}: ${reason}`);
+  constructor(path: string, reason: string, line?: number) {
+    super(`${path}${line === undefined ? "" : `:${line}`}: ${reason}`);
   }
 }
 
@@ -15,7 +15,7 @@ async function readOptional(path: string): Promise<string | null> {
     return await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new EnvFileError(path, 1, "Cannot read file");
+    throw new EnvFileError(path, "Cannot read file");
   }
 }
 
@@ -29,27 +29,17 @@ export async function loadEnvFile(): Promise<void> {
     try {
       config = Bun.TOML.parse(text) as Record<string, unknown>;
     } catch {
-      // Bun's TOML errors have no input line number. Locate the last valid prefix.
-      const lines = text.split(/\r?\n/);
-      let line = 1;
-      for (let end = lines.length - 1; end > 0; end--) {
-        try {
-          Bun.TOML.parse(lines.slice(0, end).join("\n"));
-          line = end + 1;
-          break;
-        } catch { /* Try the preceding prefix. */ }
-      }
-      throw new EnvFileError(configPath, line, "Invalid TOML");
+      throw new EnvFileError(configPath, "Invalid TOML");
     }
     if (Object.keys(config).some(key => key !== "env_file")) {
-      throw new EnvFileError(configPath, 1, "Unknown config key; only env_file is supported");
+      throw new EnvFileError(configPath, "Unknown config key; only env_file is supported");
     }
     if (config.env_file !== undefined) {
-      if (typeof config.env_file !== "string" || !config.env_file || config.env_file.includes("\0")) {
-        throw new EnvFileError(configPath, 1, "env_file must be a non-empty path string");
+      if (typeof config.env_file !== "string" || !config.env_file) {
+        throw new EnvFileError(configPath, "env_file must be a non-empty path string");
       }
       const path = config.env_file;
-      envPath = path === "~" ? home : path.startsWith("~/")
+      envPath = path.startsWith("~/")
         ? join(home, path.slice(2)) : resolve(dirname(configPath), path);
     }
   }
@@ -59,15 +49,15 @@ export async function loadEnvFile(): Promise<void> {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match || line.includes("\0")) {
-      throw new EnvFileError(envPath, index + 1, "Expected KEY=VALUE");
+    if (!match) {
+      throw new EnvFileError(envPath, "Expected KEY=VALUE", index + 1);
     }
     const key = match[1]!;
     let value = match[2]!.trim();
     if (value.startsWith('"') || value.startsWith("'")) {
       const quote = value[0]!;
       if (value.length < 2 || !value.endsWith(quote) || value.slice(1, -1).includes(quote)) {
-        throw new EnvFileError(envPath, index + 1, "Invalid quoted value; multiline values are not supported");
+        throw new EnvFileError(envPath, "Invalid quoted value; multiline values are not supported", index + 1);
       }
       value = value.slice(1, -1);
     }
