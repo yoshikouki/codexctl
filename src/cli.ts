@@ -15,6 +15,7 @@ import {
   runJobWorker,
   waitForJob,
 } from "./job.ts";
+import { loadEnvFile } from "./env.ts";
 
 type Args = {
   positionals: string[];
@@ -49,6 +50,7 @@ const knownPublicFlags = [
 ];
 
 async function main(argv: string[]): Promise<void> {
+  await loadEnvFile();
   const args = parseArgs(argv);
   const [resource, action, key, extra] = args.positionals;
 
@@ -310,7 +312,11 @@ function usageText(): string {
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait]
   codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]
 
-Notifications: codexctl only reads CODEXCTL_GROK_BOT_NOTIFY_URL and CODEXCTL_GROK_BOT_NOTIFY_KEY from the environment and never stores them.
+Environment: every CLI invocation and worker loads ~/.config/codexctl/env by default (using HOME).
+Set env_file in ~/.config/codexctl/config.toml to override the path; ~ expands to HOME and relative paths use the config directory.
+Existing environment variables win. Missing files are ignored. Protect the env file with chmod 600.
+
+Notifications: codexctl reads CODEXCTL_GROK_BOT_NOTIFY_URL and CODEXCTL_GROK_BOT_NOTIFY_KEY from the loaded environment and never stores them.
 Automatic notifications use the environment of the process that starts the worker: job run, or job steer on a finished job (which restarts the worker).
 job notify uses the caller's environment.
 When the URL is missing, the worker records notify.skipped, shown in job summary as lastNotification.`;

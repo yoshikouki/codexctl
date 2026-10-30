@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
@@ -23,10 +23,21 @@ import {
 const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dir, "..");
 
-beforeEach(() => {
+let testHome: string;
+let previousHome: string | undefined;
+beforeEach(async () => {
+  previousHome = process.env.HOME;
+  testHome = await mkdtemp("/tmp/codexctl-args-");
+  process.env.HOME = testHome;
   process.env.CODEXCTL_HOME = ".codexctl";
   delete process.env.CODEXCTL_STATE_REPO;
   process.chdir(repoRoot);
+});
+
+afterEach(async () => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  await rm(testHome, { recursive: true, force: true });
 });
 
 async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode: number; stdout: string; stderr: string }> {

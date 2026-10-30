@@ -15,6 +15,7 @@ let received: Array<{ auth: string | null; contentType: string | null; body: any
 beforeEach(async () => {
   savedEnv = { ...process.env };
   tmp = await mkdtemp(join(import.meta.dir, "tmp-notify-"));
+  process.env.HOME = tmp;
   process.env.CODEXCTL_HOME = join(tmp, "state");
   delete process.env.CODEXCTL_WORKER_ID;
   received = [];
@@ -94,6 +95,35 @@ for (const [mode, status] of [["completed", "completed"], ["failed", "failed"], 
     expect(sent).toHaveLength(1);
     expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status: "sent", at: sent[0].at });
     await assertPrivate();
+  });
+}
+
+for (const caller of ["CLI", "worker only"]) {
+  test(`${caller} loads notification credentials from the env file`, async () => {
+    const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!;
+    const key = process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY!;
+    await mkdir(join(tmp, ".config/codexctl"), { recursive: true });
+    await Bun.write(join(tmp, ".config/codexctl/env"), `CODEXCTL_GROK_BOT_NOTIFY_URL=${url}\nCODEXCTL_GROK_BOT_NOTIFY_KEY=${key}\n`);
+    delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
+    delete process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY;
+    if (caller === "worker only") {
+      await start();
+    } else {
+      const proc = Bun.spawn([process.execPath, cli, "job", "run", "--key", "demo", "--repo", root, "--prompt", "fixture only"], {
+        env: process.env, stdout: "pipe", stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).not.toContain(url);
+      expect(stdout).not.toContain(key);
+    }
+    await waitExited("demo");
+    expect((await readJob("demo")).status).toBe("completed");
+    expect(received).toHaveLength(1);
+    expect(received[0]!.auth).toBe(`Bearer ${key}`);
+    process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY = key;
+    await assertPrivate("demo", url);
   });
 }
 
