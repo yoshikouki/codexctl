@@ -101,7 +101,7 @@ test("run detaches; global state, JSON summary, notify and live steer work acros
   expect(Array.from(summary.value.latestAgentMessage)).toHaveLength(2000);
   expect(summary.value.finalResponse).toBe("");
   expect(summary.value.recentEvents).toHaveLength(5);
-  expect(Object.keys(summary.value).sort()).toEqual(["key", "status", "repo", "threadId", "turnId", "createdAt", "startedAt", "completedAt", "pendingApprovals", "latestAgentMessage", "finalResponse", "error", "recentEvents"].sort());
+  expect(Object.keys(summary.value).sort()).toEqual(["key", "status", "repo", "threadId", "turnId", "createdAt", "startedAt", "completedAt", "pendingApprovals", "latestAgentMessage", "finalResponse", "error", "lastNotification", "recentEvents"].sort());
   expect((await cli(["job", "notify", "demo"])).code).toBe(0);
   expect((await cli(["job", "steer", "demo", "--prompt", "adjust"])).code).toBe(0);
   await until(async () => (await readJobEvents("demo") as any[]).some(e => e.message?.method === "turn/steer"));

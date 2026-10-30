@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { createJob, readJob, readJobEvents, runJob, enqueueApprovalDecision } from "../src/job.ts";
+import { createJob, readJob, readJobEvents, readJobSummary, runJob, enqueueApprovalDecision } from "../src/job.ts";
 import { sendJobNotification } from "../src/notify.ts";
 import { jobDir } from "../src/state.ts";
 
@@ -69,10 +69,10 @@ async function start(key = "demo") {
   return runJob({ key, repo: root, prompt: "fixture only" });
 }
 
-async function assertPrivate(key = "demo") {
+async function assertPrivate(key = "demo", url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!) {
   for (const file of ["job.json", "events.jsonl", "worker.log", "worker.err.log"]) {
     const text = await Bun.file(join(jobDir(key), file)).text();
-    expect(text).not.toContain(process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!);
+    expect(text).not.toContain(url);
     expect(text).not.toContain(process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY!);
   }
 }
@@ -90,6 +90,9 @@ for (const [mode, status] of [["completed", "completed"], ["failed", "failed"], 
     expect(received[0]!.body).not.toHaveProperty("approvalId");
     expect(Array.from(received[0]!.body.finalResponse).length).toBeLessThanOrEqual(2000);
     expect(Number.isNaN(Date.parse(received[0]!.body.at))).toBe(false);
+    const sent = (await readJobEvents("demo") as any[]).filter(e => e.event?.type === "notify.sent");
+    expect(sent).toHaveLength(1);
+    expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status: "sent", at: sent[0].at });
     await assertPrivate();
   });
 }
@@ -107,15 +110,56 @@ test("approval IDs notify once each, before completion", async () => {
   await assertPrivate();
 });
 
-test("unset URL skips automatic notification and manual command returns JSON error", async () => {
+for (const mode of ["completed", "failed", "interrupted", "crash"]) {
+  test(`unset URL records one skip: ${mode}; manual error is unchanged`, async () => {
+    process.env.TEST_MODE = mode;
+    const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!;
+    delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
+    await start();
+    await waitExited("demo");
+    expect(received).toHaveLength(0);
+    const events = await readJobEvents("demo") as any[];
+    const skipped = events.filter(e => e.event?.type === "notify.skipped");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].event).toEqual({ type: "notify.skipped", reason: "not_configured" });
+    expect(Number.isNaN(Date.parse(skipped[0].at))).toBe(false);
+    const summary = await readJobSummary("demo", 0);
+    expect(summary.lastNotification).toEqual({ status: "skipped", at: skipped[0].at });
+    expect(summary.recentEvents).toEqual([]);
+    const result = await manual();
+    expect(result.code).not.toBe(0);
+    expect(JSON.parse(result.stderr).error.code).toBe("notify_not_configured");
+    expect(await readJobEvents("demo")).toEqual(events);
+    await assertPrivate("demo", url);
+  });
+}
+
+test("unset URL records one skip per approval ID and then completion", async () => {
+  process.env.TEST_MODE = "approval";
+  const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!;
   delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
   await start();
+  const skips = async () => (await readJobEvents("demo") as any[]).filter(e => e.event?.type === "notify.skipped");
+  for (let i = 0; i < 100 && (await skips()).length < 2; i++) await Bun.sleep(20);
+  expect(await skips()).toHaveLength(2);
+  await enqueueApprovalDecision("demo", "91", "approve");
+  await enqueueApprovalDecision("demo", "92", "approve");
   await waitExited("demo");
+  expect(await skips()).toHaveLength(3);
   expect(received).toHaveLength(0);
-  expect(JSON.stringify(await readJobEvents("demo"))).not.toContain("notify.");
-  const result = await manual();
-  expect(result.code).not.toBe(0);
-  expect(JSON.parse(result.stderr).error.code).toBe("notify_not_configured");
+  await assertPrivate("demo", url);
+});
+
+test("summary uses the latest notification across results even with events hidden", async () => {
+  const job = await createJob({ key: "demo", repo: root, prompt: "fixture" });
+  expect((await readJobSummary("demo", 0)).lastNotification).toBeNull();
+  for (const status of ["sent", "failed", "skipped"] as const) {
+    if (status === "failed") server.reload({ fetch: () => new Response("", { status: 500 }) });
+    if (status === "skipped") delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
+    await sendJobNotification(jobDir("demo"), job, "job.completed");
+    const events = await readJobEvents("demo") as any[];
+    expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status, at: events.at(-1).at });
+  }
 });
 
 async function manual() {

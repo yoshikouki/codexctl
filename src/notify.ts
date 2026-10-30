@@ -13,7 +13,16 @@ export async function sendJobNotification(
   approvalId?: string,
 ): Promise<NotifyResult> {
   const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
-  if (!url) return { ok: false, error: { code: "notify_not_configured", message: "CODEXCTL_GROK_BOT_NOTIFY_URL is not configured" } };
+  if (!url) {
+    if (event !== "job.status") {
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: "notify.skipped", reason: "not_configured" },
+        at: new Date().toISOString(),
+      }).catch(() => undefined);
+    }
+    return { ok: false, error: { code: "notify_not_configured", message: "CODEXCTL_GROK_BOT_NOTIFY_URL is not configured" } };
+  }
   const key = process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY;
   // Never include the notification credentials in model-generated text.
   const redact = (text: string) => [url, key].reduce<string>((value, secret) => secret ? value.replaceAll(secret, "[REDACTED]") : value, text);

@@ -53,13 +53,15 @@ codexctl job wait tests-review --timeout-ms 600000
 - worker が終了状態に達すると `job.completed`・`job.failed`・`job.cancelled` を送ります。再開後の終了も対象です。
 - 承認要求では worker 内の承認 ID ごとに一度 `approval.requested` を送ります。
 - `codexctl job notify demo` は現在の状態を `job.status` として一度送ります。
-- URL がなければ自動通知は無効です。URL があって key がなければ送信せず、`missing_key` を記録します。
+- URL がなければ自動通知の契機ごとに一度、`notify.skipped`（`reason: "not_configured"`）を記録します。URL があって key がなければ送信せず、`missing_key` を記録します。
 
 JSON POST に `Content-Type: application/json` と Bearer 認証を使います。payload は `source: "codexctl"`、`event`、`key`、`status`、`repo`、`threadId`、`turnId`、ISO 時刻の `at`、`finalResponse` です。`threadId` と `turnId` は null の場合があります。`finalResponse` は最大 2,000 Unicode コードポイントで、`approval.requested` だけに `approvalId` を加えます。
 
 prompt・承認の params・error・環境変数は payload に含めません。通知 URL/key と一致する文字列は伏せますが、それ以外の秘密情報を自動判別する機能はありません。
 
 送信は10秒で打ち切り、再送もリダイレクト追従もしません。HTTP 200 を成功として `notify.sent`、失敗を `notify.failed` に記録します。通知失敗でジョブの状態は変わりません。イベントの記録自体に失敗した場合は記録を省略します。起動前のキャンセルも worker が処理すると通知しますが、worker の起動失敗では自動通知しません。
+
+`job summary` の `lastNotification` は最後の通知結果 `{ status: "sent" | "failed" | "skipped", at }` を返します（記録がなければ null、`--events 0` でも表示）。
 
 ## エージェント向けスキル
 
