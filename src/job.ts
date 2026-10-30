@@ -129,6 +129,7 @@ export type JobSummary = Pick<JobRecord,
 > & {
   pendingApprovals: { count: number; ids: string[] };
   latestAgentMessage: string;
+  lastNotification: { status: "sent" | "failed" | "skipped"; at: string } | null;
   recentEvents: unknown[];
 };
 
@@ -459,6 +460,16 @@ export async function readJobSummary(key: string, eventLimit = 5): Promise<JobSu
 
 async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobSummary> {
   const events = await readJobEvents(job.key);
+  let lastNotification: JobSummary["lastNotification"] = null;
+  for (const raw of events) {
+    const entry = raw as AppServerEvent;
+    if (entry.direction !== "worker") continue;
+    const type = entry.event.type;
+    if (type === "notify.sent" || type === "notify.failed" || type === "notify.skipped") {
+      const status = type === "notify.sent" ? "sent" : type === "notify.failed" ? "failed" : "skipped";
+      lastNotification = { status, at: entry.at };
+    }
+  }
   const ids = job.approvals.filter(approval => approval.status === "pending").map(approval => approval.id);
   return {
     key: job.key, status: job.status, repo: job.repo,
@@ -467,6 +478,7 @@ async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobS
     pendingApprovals: { count: ids.length, ids },
     latestAgentMessage: Array.from(job.latestAgentMessage).slice(0, 2000).join(""),
     finalResponse: job.finalResponse, error: job.error,
+    lastNotification,
     recentEvents: eventLimit <= 0 ? [] : events.slice(-eventLimit),
   };
 }

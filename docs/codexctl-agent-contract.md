@@ -30,6 +30,9 @@ codexctl は、インストール済み Codex の app-server を操作する薄�
 
 `key`、`status`、`repo`、`threadId`、`turnId`、`createdAt`、`startedAt`、`completedAt`、`pendingApprovals: { count, ids }`、`latestAgentMessage`、`finalResponse`、`error`、`recentEvents` を返します。`latestAgentMessage` は最大 2,000 Unicode コードポイント、`finalResponse` は全文です。`--events 0` で `recentEvents` は空配列になります。
 
+`lastNotification` は最後の通知結果 `{ status: "sent" | "failed" | "skipped", at }`（記録がなければ null）で、`--events` に依存しません。
+自動通知で URL が未設定なら契機ごとに一度 `notify.skipped`（`reason: "not_configured"`）を記録します。通知 URL/key は記録せず、手動通知の `notify_not_configured` エラーは変わりません。
+
 ### Wait
 
 `key`、`ready`、`reason`、`status`、`summary`、`elapsedMs`、`intervalMs`、`ignoredApprovalIds`、`timeoutMs`、`deadlineAt` を返します。
