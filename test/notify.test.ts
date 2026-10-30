@@ -154,6 +154,7 @@ for (const mode of ["completed", "failed", "interrupted", "crash"]) {
     expect(skipped[0].event).toEqual({ type: "notify.skipped", reason: "not_configured" });
     expect(Number.isNaN(Date.parse(skipped[0].at))).toBe(false);
     const summary = await readJobSummary("demo", 0);
+    expect((await readJob("demo")).lastNotification).toEqual(summary.lastNotification);
     expect(summary.lastNotification).toEqual({ status: "skipped", at: skipped[0].at });
     expect(summary.recentEvents).toEqual([]);
     const result = await manual();
@@ -180,15 +181,23 @@ test("unset URL records one skip per approval ID and then completion", async () 
   await assertPrivate("demo", url);
 });
 
-test("summary uses the latest notification across results even with events hidden", async () => {
-  const job = await createJob({ key: "demo", repo: root, prompt: "fixture" });
+test("summary reads worker notification results from job.json without the event log", async () => {
+  await createJob({ key: "demo", repo: root, prompt: "fixture" });
   expect((await readJobSummary("demo", 0)).lastNotification).toBeNull();
   for (const status of ["sent", "failed", "skipped"] as const) {
     if (status === "failed") server.reload({ fetch: () => new Response("", { status: 500 }) });
     if (status === "skipped") delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
-    await sendJobNotification(jobDir("demo"), job, "job.completed");
-    const events = await readJobEvents("demo") as any[];
-    expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status, at: events.at(-1).at });
+    await start(status);
+    await waitExited(status);
+    const job = await readJob(status);
+    const events = await readJobEvents(status) as any[];
+    const notification = events.findLast(e => e.event?.type === `notify.${status}`);
+    expect(job.lastNotification).toEqual({ status, at: notification.at });
+    await rm(join(jobDir(status), "events.jsonl"));
+    expect((await readJobSummary(status)).lastNotification).toEqual(job.lastNotification);
+    // Even an unreadable log must not be opened with --events 0.
+    await mkdir(join(jobDir(status), "events.jsonl"));
+    expect((await readJobSummary(status, 0)).lastNotification).toEqual(job.lastNotification);
   }
 });
 

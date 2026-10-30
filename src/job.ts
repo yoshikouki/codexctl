@@ -1,11 +1,22 @@
 import { appendFile, mkdir, readdir, rm, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
-import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents } from "./events.ts";
-import { sendJobNotification } from "./notify.ts";
+import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents, readTailEvents } from "./events.ts";
+import { sendJobNotification, type NotifyEvent } from "./notify.ts";
 import { jobDir, jobsRoot, codexctlHome } from "./state.ts";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+type JobProgress = {
+  current: { type: string; startedAt: string; command?: string } | null;
+  lastCommentary: string | null;
+  commands: { run: number; failed: number };
+  totalTokens: number | null;
+};
+
+function emptyProgress(): JobProgress {
+  return { current: null, lastCommentary: null, commands: { run: 0, failed: 0 }, totalTokens: null };
+}
 
 class JobOperationError extends Error {
   constructor(
@@ -36,6 +47,8 @@ export type JobRecord = {
   approvals: ApprovalRecord[];
   finalResponse: string;
   latestAgentMessage: string;
+  progress: JobProgress;
+  lastNotification: { status: "sent" | "failed" | "skipped"; at: string } | null;
   controlOffset: number;
   resumeCommandId: string | null;
   error: string | null;
@@ -116,11 +129,10 @@ type JobListItem = Pick<JobRecord,
 };
 
 type JobSummary = Pick<JobRecord,
-  "key" | "status" | "repo" | "threadId" | "turnId" | "createdAt" | "startedAt" | "completedAt" | "finalResponse" | "error"
+  "key" | "status" | "repo" | "threadId" | "turnId" | "createdAt" | "startedAt" | "completedAt" | "finalResponse" | "error" | "progress" | "lastNotification"
 > & {
   pendingApprovals: { count: number; ids: string[] };
   latestAgentMessage: string;
-  lastNotification: { status: "sent" | "failed" | "skipped"; at: string } | null;
   recentEvents: unknown[];
 };
 
@@ -272,6 +284,8 @@ export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
     approvals: [],
     finalResponse: "",
     latestAgentMessage: "",
+    progress: emptyProgress(),
+    lastNotification: null,
     controlOffset: 0,
     resumeCommandId: null,
     error: null,
@@ -321,6 +335,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   record.turnId = null;
   record.finalResponse = "";
   record.latestAgentMessage = "";
+  record.progress.current = null;
   record.error = null;
   record.approvals = [];
   record.cancelRequestedAt = null;
@@ -336,6 +351,11 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 
   const processedControlIds = new Set<string>();
   const notifiedApprovals = new Set<string>();
+  const currentItem = { id: null as string | null };
+  const notify = (event: NotifyEvent, approvalId?: string) => sendJobNotification(dir, record, event, approvalId, async notification => {
+    record.lastNotification = notification;
+    await writeJobRecord(dir, record);
+  });
   let client: AppServerClient | undefined;
   try {
     const queued = await readNewCompleteLines(`${dir}/control.jsonl`, record.controlOffset);
@@ -351,13 +371,13 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     }
     client = new AppServerClient(async (event) => {
       await appendEvent(dir, event);
-      updateRecordFromEvent(record, event);
+      updateRecordFromEvent(record, event, currentItem);
       await writeJobRecord(dir, record);
       if (event.direction === "server" && "method" in event.message && "id" in event.message && isApprovalRequest(event.message.method)) {
         const approvalId = String(event.message.id);
         if (!notifiedApprovals.has(approvalId)) {
           notifiedApprovals.add(approvalId);
-          await sendJobNotification(dir, record, "approval.requested", approvalId);
+          await notify("approval.requested", approvalId);
         }
       }
     });
@@ -401,7 +421,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   } finally {
     await client?.close();
     if (isTerminalStatus(record.status)) {
-      await sendJobNotification(dir, record, `job.${record.status}`);
+      await notify(`job.${record.status}`);
     }
     await appendEvent(dir, {
       direction: "worker",
@@ -418,7 +438,9 @@ export async function notifyJob(key: string) {
 }
 
 export async function readJob(key: string): Promise<JobRecord> {
-  return await Bun.file(`${jobDir(key)}/job.json`).json() as JobRecord;
+  const record = await Bun.file(`${jobDir(key)}/job.json`).json() as JobRecord;
+  record.progress ??= emptyProgress();
+  return record;
 }
 
 export async function readJobEvents(key: string): Promise<unknown[]> {
@@ -430,17 +452,6 @@ export async function readJobSummary(key: string, eventLimit = 5): Promise<JobSu
 }
 
 async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobSummary> {
-  const events = await readJobEvents(job.key);
-  let lastNotification: JobSummary["lastNotification"] = null;
-  for (const raw of events) {
-    const entry = raw as AppServerEvent;
-    if (entry.direction !== "worker") continue;
-    const type = entry.event.type;
-    if (type === "notify.sent" || type === "notify.failed" || type === "notify.skipped") {
-      const status = type === "notify.sent" ? "sent" : type === "notify.failed" ? "failed" : "skipped";
-      lastNotification = { status, at: entry.at };
-    }
-  }
   const ids = job.approvals.filter(approval => approval.status === "pending").map(approval => approval.id);
   return {
     key: job.key, status: job.status, repo: job.repo,
@@ -449,8 +460,9 @@ async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobS
     pendingApprovals: { count: ids.length, ids },
     latestAgentMessage: Array.from(job.latestAgentMessage).slice(0, 2000).join(""),
     finalResponse: job.finalResponse, error: job.error,
-    lastNotification,
-    recentEvents: eventLimit <= 0 ? [] : events.slice(-eventLimit),
+    progress: job.progress,
+    lastNotification: job.lastNotification,
+    recentEvents: await readTailEvents(`${jobDir(job.key)}/events.jsonl`, eventLimit),
   };
 }
 
@@ -586,7 +598,7 @@ async function waitForTurnCompletion(
   }
 }
 
-function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
+function updateRecordFromEvent(record: JobRecord, event: AppServerEvent, currentItem: { id: string | null }): void {
   if (event.direction !== "server" || !("method" in event.message)) return;
   const { method, params } = event.message;
   if ("id" in event.message && isApprovalRequest(method)) {
@@ -613,6 +625,14 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
   if (method === "item/started") {
     const itemType = getNestedString(params, ["item", "type"]);
     const phase = getNestedString(params, ["item", "phase"]);
+    if (itemType) {
+      currentItem.id = getNestedString(params, ["item", "id"]);
+      record.progress.current = {
+        type: itemType,
+        startedAt: event.at,
+        ...(itemType === "commandExecution" ? { command: Array.from(getNestedString(params, ["item", "command"]) ?? "").slice(0, 200).join("") } : {}),
+      };
+    }
     if (itemType === "agentMessage") record.latestAgentMessage = "";
     if (itemType === "agentMessage" && phase === "final_answer") {
       record.finalResponse = "";
@@ -626,12 +646,31 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
     const itemType = getNestedString(params, ["item", "type"]);
     const phase = getNestedString(params, ["item", "phase"]);
     const text = getNestedString(params, ["item", "text"]);
+    if (currentItem.id !== null && currentItem.id === getNestedString(params, ["item", "id"])) {
+      record.progress.current = null;
+      currentItem.id = null;
+    }
+    if (itemType === "commandExecution" && isObject(params) && isObject(params.item)) {
+      record.progress.commands.run++;
+      if ((typeof params.item.exitCode === "number" && params.item.exitCode !== 0) || params.item.status !== "completed") {
+        record.progress.commands.failed++;
+      }
+    }
+    if (itemType === "agentMessage" && phase === "commentary" && text !== null) {
+      record.progress.lastCommentary = Array.from(text).slice(0, 500).join("");
+    }
     if (itemType === "agentMessage" && text !== null) record.latestAgentMessage = text;
     if (itemType === "agentMessage" && phase === "final_answer" && text !== null) {
       record.finalResponse = text;
     }
   }
+  if (method === "thread/tokenUsage/updated" && isObject(params) && isObject(params.tokenUsage) && isObject(params.tokenUsage.total)) {
+    const totalTokens = params.tokenUsage.total.totalTokens;
+    if (typeof totalTokens === "number") record.progress.totalTokens = totalTokens;
+  }
   if (method === "turn/completed") {
+    record.progress.current = null;
+    currentItem.id = null;
     const status = getNestedString(params, ["turn", "status"]);
     record.status = status === "failed" ? "failed" : status === "interrupted" ? "cancelled" : "completed";
     record.error = record.status === "cancelled" ? null : getNestedString(params, ["turn", "error", "message"]);

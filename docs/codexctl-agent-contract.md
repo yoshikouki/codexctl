@@ -30,7 +30,9 @@ Wait flags are `--events <n>`, `--interval-ms <ms>`, and `--timeout-ms <ms>`. Us
 
 Returns `key`, `status`, `repo`, `threadId`, `turnId`, `createdAt`, `startedAt`, `completedAt`, `pendingApprovals: { count, ids }`, `latestAgentMessage`, `finalResponse`, `error`, and `recentEvents`. `latestAgentMessage` is limited to 2,000 Unicode code points; `finalResponse` is the full text. `--events 0` makes `recentEvents` an empty array.
 
-`lastNotification` is the latest notification result, `{ status: "sent" | "failed" | "skipped", at }`, or null if none is recorded. It does not depend on `--events`.
+`progress` contains `current: { type, startedAt, command? } | null`, `lastCommentary: string | null`, `commands: { run, failed }`, and `totalTokens: number | null`. The worker sets `current` on item start and clears it on completion with the same item ID or on turn completion. Only command execution includes `command` (200 Unicode code points); `lastCommentary` is the latest completed agent message with phase `commentary` (500 code points). Command counts accumulate across turns; `failed` counts nonzero exit codes or a status other than `completed`. `totalTokens` is the latest `tokenUsage.total.totalTokens`. Missing progress defaults to null values and zero counts.
+
+`progress` and `lastNotification` are read from `job.json`; `recentEvents` reads only the requested log tail. `lastNotification` is the latest worker notification result, `{ status: "sent" | "failed" | "skipped", at }`, or null if none is recorded. It does not depend on `--events`. Manual `job notify` results remain in the event log and do not update this saved value.
 If the URL is missing, each automatic notification trigger records one `notify.skipped` event with `reason: "not_configured"`, shown in `lastNotification`. The notification URL and key are never recorded. Manual notifications still return the `notify_not_configured` error.
 
 ### Wait

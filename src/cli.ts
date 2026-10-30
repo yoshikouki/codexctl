@@ -312,6 +312,11 @@ function usageText(): string {
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait]
   codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]
 
+Summary progress: current item (type, startedAt; command execution includes command, up to 200 characters),
+lastCommentary (latest completed commentary, up to 500 characters), commands (run/failed across turns), and totalTokens.
+Unavailable values are null; counts start at zero. current clears on matching item completion or turn completion.
+Summary reads saved progress and lastNotification from job.json, plus only the requested event tail.
+
 Environment: every CLI invocation and worker loads ~/.config/codexctl/env by default (using HOME).
 Set env_file in ~/.config/codexctl/config.toml to override the path; ~ expands to HOME and relative paths use the config directory.
 Existing environment variables win. Missing files are ignored. Protect the env file with chmod 600.
