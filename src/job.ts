@@ -1,23 +1,21 @@
-import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { appendFile, mkdir, readdir, rm, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
 import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents } from "./events.ts";
 import { sendJobNotification } from "./notify.ts";
-import { jobDir, jobsRoot, stateEnvForChild } from "./state.ts";
+import { jobDir, jobsRoot, codexctlHome } from "./state.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export class JobOperationError extends Error {
   constructor(
-    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable" | "job_state_changed",
+    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable",
     message: string,
     readonly exitCode = 2,
   ) {
     super(message);
   }
 }
-
-class StaleWorkerWriteError extends Error {}
 
 export type JobRecord = {
   key: string;
@@ -37,6 +35,9 @@ export type JobRecord = {
   cancelCommandId: string | null;
   approvals: ApprovalRecord[];
   finalResponse: string;
+  latestAgentMessage: string;
+  controlOffset: number;
+  resumeCommandId: string | null;
   error: string | null;
 };
 
@@ -57,6 +58,7 @@ export type ApprovalRecord = {
 export type TurnSteerCommand = {
   id: string;
   type: "turn.steer";
+  resume?: true;
   at: string;
   input: Array<{ type: "text"; text: string }>;
 };
@@ -84,16 +86,8 @@ export type CreateJobOptions = {
   force?: boolean;
 };
 
-export type RunJobOptions = CreateJobOptions & JobWaitOptions;
-
-export type JobRunResult = {
-  key: string;
-  started: JobRecord;
-  wait: JobWaitResult;
-};
-
 export type JobCancelResult = {
-  action: "cancelled" | "interrupt_queued" | "already_requested" | "failed" | "none";
+  action: "interrupt_queued" | "none";
   reason: string;
   job: JobRecord;
   command: TurnInterruptCommand | null;
@@ -130,29 +124,11 @@ export type JobListItem = {
 
 export type JobNextAction = "wait" | "wait_cancel" | "resolve_approval" | "read_result" | "inspect_error" | "cancelled";
 
-export type JobSummary = {
-  key: string;
-  jobIncarnation: string | null;
-  status: JobStatus;
-  nextAction: JobNextAction;
-  repo: string;
-  prompt: string;
-  createdAt: string;
-  updatedAt: string;
-  startedAt: string | null;
-  completedAt: string | null;
-  workerId: string | null;
-  workerPid: number | null;
-  threadId: string | null;
-  turnId: string | null;
-  cancelRequestedAt: string | null;
-  cancelCommandId: string | null;
-  pendingApprovals: ApprovalRecord[];
-  actionableApprovals: ApprovalRecord[];
-  canResolveApprovals: boolean;
-  approvalCounts: Record<ApprovalStatus, number>;
-  finalResponse: string;
-  error: string | null;
+export type JobSummary = Pick<JobRecord,
+  "key" | "status" | "repo" | "threadId" | "turnId" | "createdAt" | "startedAt" | "completedAt" | "finalResponse" | "error"
+> & {
+  pendingApprovals: { count: number; ids: string[] };
+  latestAgentMessage: string;
   recentEvents: unknown[];
 };
 
@@ -173,7 +149,6 @@ export type JobWaitResult = {
   timeoutMs: number | null;
   deadlineAt: string | null;
   status: JobStatus;
-  nextAction: JobNextAction;
   summary: JobSummary;
 };
 
@@ -192,22 +167,10 @@ export type CancelAndWaitResult = {
   wait: JobWaitResult;
 };
 
-const JOB_RECORD_LOCK_STALE_MS = 30_000;
-const JOB_RECORD_LOCK_RETRY_MS = 25;
-const JOB_RECORD_LOCK_ATTEMPTS = 80;
-
-export async function runJob(options: RunJobOptions): Promise<JobRunResult> {
+export async function runJob(options: CreateJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
-  const started = await spawnDetachedWorker(record, jobDir(record.key));
-  return {
-    key: started.key,
-    started,
-    wait: await waitForJob(started.key, {
-      eventLimit: options.eventLimit,
-      intervalMs: options.intervalMs,
-      timeoutMs: options.timeoutMs,
-    }),
-  };
+  spawnDetachedWorker(record.key);
+  return record;
 }
 
 export async function listJobs(): Promise<JobListItem[]> {
@@ -281,79 +244,13 @@ export async function removeJob(key: string, options: JobRemoveOptions = {}): Pr
 
 export async function cancelJob(key: string): Promise<JobCancelResult> {
   const dir = jobDir(key);
-  return await withJobRecordLock(dir, key, async () => {
-    const job = await readPersistedJobRecord(dir, key);
-    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-      return { action: "none", reason: `job is already ${job.status}`, job, command: null };
-    }
-    if (job.status === "queued") {
-      const now = new Date().toISOString();
-      job.status = "cancelled";
-      job.error = null;
-      job.cancelRequestedAt = now;
-      job.completedAt = now;
-      job.updatedAt = now;
-      await writeJobRecordUnlocked(dir, job);
-      await appendEvent(dir, {
-        direction: "worker",
-        event: { type: "job.cancelled", reason: "queued" },
-        at: now,
-      });
-      return { action: "cancelled", reason: "queued job cancelled before worker start", job, command: null };
-    }
-
-    if (job.cancelRequestedAt) {
-      return { action: "already_requested", reason: "turn interrupt command was already queued", job, command: null };
-    }
-
-    if (!isProcessAlive(job.workerPid)) {
-      const now = new Date().toISOString();
-      if (!job.threadId && !job.turnId) {
-        job.status = "cancelled";
-        job.error = null;
-        job.cancelRequestedAt = now;
-        job.completedAt = now;
-        job.updatedAt = now;
-        await writeJobRecordUnlocked(dir, job);
-        await appendEvent(dir, {
-          direction: "worker",
-          event: { type: "job.cancelled", reason: "worker_not_alive_before_turn_start", workerPid: job.workerPid },
-          at: now,
-        });
-        return { action: "cancelled", reason: "worker was not alive before turn start", job, command: null };
-      }
-
-      job.status = "failed";
-      job.error = "worker process is not alive; in-flight app-server stdio sessions cannot be interrupted";
-      job.completedAt = now;
-      job.updatedAt = now;
-      await writeJobRecordUnlocked(dir, job);
-      await appendEvent(dir, {
-        direction: "worker",
-        event: { type: "cancel.failed", reason: "in_flight_stdio_session_not_interruptible", workerPid: job.workerPid },
-        at: now,
-      });
-      return { action: "failed", reason: "in-flight app-server stdio session cannot be interrupted", job, command: null };
-    }
-
-    const now = new Date().toISOString();
-    const command: TurnInterruptCommand = {
-      id: crypto.randomUUID(),
-      type: "turn.interrupt",
-      at: now,
-    };
-    job.cancelRequestedAt = now;
-    job.cancelCommandId = command.id;
-    job.updatedAt = now;
-    await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-    await appendEvent(dir, {
-      direction: "control",
-      command,
-      at: now,
-    });
-    await writeJobRecordUnlocked(dir, job);
-    return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
-  });
+  const job = await readJob(key);
+  if (isTerminalStatus(job.status)) {
+    return { action: "none", reason: `job is already ${job.status}`, job, command: null };
+  }
+  const command: TurnInterruptCommand = { id: crypto.randomUUID(), type: "turn.interrupt", at: new Date().toISOString() };
+  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
 }
 
 export async function cancelJobAndWait(key: string, options: JobWaitOptions = {}): Promise<CancelAndWaitResult> {
@@ -367,119 +264,97 @@ export async function cancelJobAndWait(key: string, options: JobWaitOptions = {}
 export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
   const dir = jobDir(options.key);
-  await mkdir(dir, { recursive: true });
-  return await withJobRecordLock(dir, options.key, async () => {
-    const existingJob = Bun.file(`${dir}/job.json`);
-    if (await existingJob.exists()) {
-      if (!options.force) {
-        throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
-      }
-      try {
-        const existing = await readPersistedJobRecord(dir, options.key);
-        if (existing.workerPid !== null && isProcessAlive(existing.workerPid)) {
-          throw new JobOperationError("job_worker_alive", `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`);
-        }
-      } catch (error) {
-        if (error instanceof JobOperationError) throw error;
-      }
+  await mkdir(jobsRoot(), { recursive: true });
+  try {
+    await mkdir(dir);
+  } catch (error) {
+    if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
+    if (!options.force) throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
+    const existing = await readJob(options.key);
+    if (isProcessAlive(existing.workerPid)) {
+      throw new JobOperationError("job_worker_alive", `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`);
     }
-    await Bun.write(`${dir}/events.jsonl`, "");
-    await Bun.write(`${dir}/control.jsonl`, "");
-    await Bun.write(`${dir}/worker.log`, "");
-    await Bun.write(`${dir}/worker.err.log`, "");
+  }
+  await Bun.write(`${dir}/events.jsonl`, "");
+  await Bun.write(`${dir}/control.jsonl`, "");
+  await Bun.write(`${dir}/worker.log`, "");
+  await Bun.write(`${dir}/worker.err.log`, "");
 
-    const record: JobRecord = {
-      key: options.key,
-      jobIncarnation: crypto.randomUUID(),
-      repo,
-      prompt: options.prompt,
-      status: "queued",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      startedAt: null,
-      completedAt: null,
-      workerId: null,
-      workerPid: null,
-      threadId: null,
-      turnId: null,
-      cancelRequestedAt: null,
-      cancelCommandId: null,
-      approvals: [],
-      finalResponse: "",
-      error: null,
-    };
-    await writeJobRecordUnlocked(dir, record);
-    return record;
-  });
+  const record: JobRecord = {
+    key: options.key,
+    jobIncarnation: crypto.randomUUID(),
+    repo,
+    prompt: options.prompt,
+    status: "queued",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    workerId: null,
+    workerPid: null,
+    threadId: null,
+    turnId: null,
+    cancelRequestedAt: null,
+    cancelCommandId: null,
+    approvals: [],
+    finalResponse: "",
+    latestAgentMessage: "",
+    controlOffset: 0,
+    resumeCommandId: null,
+    error: null,
+  };
+  await writeJobRecord(dir, record);
+  return record;
 }
 
-async function spawnDetachedWorker(record: JobRecord, dir: string): Promise<JobRecord> {
-  return await withJobRecordLock(dir, record.key, async () => {
-    const current = await readPersistedJobRecord(dir, record.key);
-    if (current.jobIncarnation !== record.jobIncarnation || current.status !== "queued") {
-      throw new JobOperationError("job_state_changed", `Job '${record.key}' changed before worker spawn`);
-    }
-    const workerId = crypto.randomUUID();
-    current.status = "running";
-    current.workerId = workerId;
-    current.workerPid = null;
-    current.completedAt = null;
-    current.updatedAt = new Date().toISOString();
-    await writeJobRecordUnlocked(dir, current);
-
-    let proc: ReturnType<typeof Bun.spawn>;
-    try {
-      proc = Bun.spawn({
-        cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", current.key],
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          ...stateEnvForChild(),
-          CODEXCTL_WORKER_ID: workerId,
-        },
-        stdin: "ignore",
-        stdout: Bun.file(`${dir}/worker.log`),
-        stderr: Bun.file(`${dir}/worker.err.log`),
-        detached: true,
-      });
-    } catch (error) {
-      current.status = "failed";
-      current.workerPid = null;
-      current.error = error instanceof Error ? error.message : String(error);
-      current.completedAt = new Date().toISOString();
-      current.updatedAt = new Date().toISOString();
-      await writeJobRecordUnlocked(dir, current);
-      await appendEvent(dir, {
-        direction: "worker",
-        event: { type: "worker.spawn_failed", workerId, error: current.error },
-        at: new Date().toISOString(),
-      });
-      throw error;
-    }
-    proc.unref();
-    current.workerPid = proc.pid;
-    current.updatedAt = new Date().toISOString();
-    await writeJobRecordUnlocked(dir, current);
-    await appendEvent(dir, {
-      direction: "worker",
-      event: { type: "worker.spawned", pid: proc.pid, workerId },
-      at: new Date().toISOString(),
-    });
-    return current;
+function spawnDetachedWorker(key: string, resumeCommandId?: string): void {
+  const dir = jobDir(key);
+  const proc = Bun.spawn({
+    cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", key],
+    env: { ...process.env, CODEXCTL_HOME: codexctlHome(), CODEXCTL_RESUME_COMMAND_ID: resumeCommandId ?? "" },
+    stdin: "ignore",
+    stdout: Bun.file(`${dir}/worker.log`),
+    stderr: Bun.file(`${dir}/worker.err.log`),
+    detached: true,
   });
+  proc.unref();
 }
 
 export async function runJobWorker(key: string): Promise<JobRecord> {
   const dir = jobDir(key);
-  const record = await readJob(key);
+  let record = await readJob(key);
+  const resumeId = process.env.CODEXCTL_RESUME_COMMAND_ID;
+  if (resumeId) {
+    // A terminal state is visible before the previous worker finishes its webhook.
+    while (isProcessAlive(record.workerPid)) await Bun.sleep(50);
+    record = await readJob(key);
+    const controls = await readNewCompleteLines(`${dir}/control.jsonl`, record.controlOffset);
+    let offset = record.controlOffset;
+    for (const line of controls.lines) {
+      offset += Buffer.byteLength(line + "\n");
+      const command = JSON.parse(line) as ControlCommand;
+      if (command.id !== resumeId || command.type !== "turn.steer") continue;
+      record.prompt = command.input.map(item => item.text).join("\n");
+      record.controlOffset = offset;
+      record.resumeCommandId = command.id;
+      break;
+    }
+    if (record.resumeCommandId !== resumeId) throw new Error("Resume command not found");
+  }
   record.status = "running";
-  record.startedAt ??= new Date().toISOString();
-  record.updatedAt = new Date().toISOString();
-  const envWorkerId = process.env.CODEXCTL_WORKER_ID;
-  if (envWorkerId) record.workerId = envWorkerId;
-  else if (!record.workerId) record.workerId = crypto.randomUUID();
-  record.workerPid ??= process.pid;
-  await writeWorkerJobRecord(dir, record);
+  record.startedAt = new Date().toISOString();
+  record.updatedAt = record.startedAt;
+  record.completedAt = null;
+  record.turnId = null;
+  record.finalResponse = "";
+  record.latestAgentMessage = "";
+  record.error = null;
+  record.approvals = [];
+  record.cancelRequestedAt = null;
+  record.cancelCommandId = null;
+  record.workerId = crypto.randomUUID();
+  record.workerPid = process.pid;
+  await writeJobRecord(dir, record);
   await appendEvent(dir, {
     direction: "worker",
     event: { type: "worker.started", pid: process.pid, workerId: record.workerId },
@@ -488,13 +363,23 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 
   const processedControlIds = new Set<string>();
   const notifiedApprovals = new Set<string>();
-  let ownsRecord = true;
   let client: AppServerClient | undefined;
   try {
+    const queued = await readNewCompleteLines(`${dir}/control.jsonl`, record.controlOffset);
+    const interrupt = queued.lines.map(line => JSON.parse(line) as ControlCommand).find(command => command.type === "turn.interrupt");
+    if (interrupt) {
+      record.controlOffset = queued.offset;
+      record.cancelRequestedAt = interrupt.at;
+      record.cancelCommandId = interrupt.id;
+      record.status = "cancelled";
+      record.completedAt = new Date().toISOString();
+      await writeJobRecord(dir, record);
+      return record;
+    }
     client = new AppServerClient(async (event) => {
       await appendEvent(dir, event);
       updateRecordFromEvent(record, event);
-      await writeWorkerJobRecord(dir, record);
+      await writeJobRecord(dir, record);
       if (event.direction === "server" && "method" in event.message && "id" in event.message && isApprovalRequest(event.message.method)) {
         const approvalId = String(event.message.id);
         if (!notifiedApprovals.has(approvalId)) {
@@ -505,11 +390,13 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     });
 
     await client.initialize();
-    const threadResult = await client.request("thread/start", {
+    const threadMethod = record.threadId ? "thread/resume" : "thread/start";
+    const threadResult = await client.request(threadMethod, {
+      ...(record.threadId ? { threadId: record.threadId } : {}),
       cwd: record.repo,
     }) as { thread?: { id?: string } };
     const threadId = threadResult.thread?.id;
-    if (!threadId) throw new Error("thread/start response did not include thread.id");
+    if (!threadId) throw new Error(`${threadMethod} response did not include thread.id`);
     record.threadId = threadId;
 
     const turnResult = await client.request("turn/start", {
@@ -520,7 +407,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     const turnId = turnResult.turn?.id;
     if (!turnId) throw new Error("turn/start response did not include turn.id");
     record.turnId = turnId;
-    await writeWorkerJobRecord(dir, record);
+    await writeJobRecord(dir, record);
 
     await Promise.race([
       waitForTurnCompletion(record, client, dir, processedControlIds),
@@ -532,37 +419,15 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     ]);
     return record;
   } catch (error) {
-    if (error instanceof StaleWorkerWriteError) {
-      ownsRecord = false;
-      await appendEvent(dir, {
-        direction: "worker",
-        event: { type: "worker.stale", error: error.message },
-        at: new Date().toISOString(),
-      });
-      throw error;
-    }
     record.status = "failed";
     record.error = error instanceof Error ? error.message : String(error);
     record.completedAt = new Date().toISOString();
     record.updatedAt = new Date().toISOString();
-    try {
-      await writeWorkerJobRecord(dir, record);
-    } catch (writeError) {
-      if (writeError instanceof StaleWorkerWriteError) {
-        ownsRecord = false;
-        await appendEvent(dir, {
-          direction: "worker",
-          event: { type: "worker.stale", error: writeError.message },
-          at: new Date().toISOString(),
-        });
-      } else {
-        throw writeError;
-      }
-    }
+    await writeJobRecord(dir, record);
     throw error;
   } finally {
     await client?.close();
-    if (ownsRecord && isTerminalStatus(record.status)) {
+    if (isTerminalStatus(record.status)) {
       await sendJobNotification(dir, record, `job.${record.status}`);
     }
     await appendEvent(dir, {
@@ -588,42 +453,26 @@ export async function readJobEvents(key: string): Promise<unknown[]> {
   return readRawEvents(`${jobDir(key)}/events.jsonl`);
 }
 
-export async function readJobSummary(key: string, eventLimit = 10): Promise<JobSummary> {
-  const job = await readJob(key);
-  const events = await readJobEvents(key);
-  const recentEvents = eventLimit <= 0 ? [] : events.slice(-eventLimit);
-  const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
-  const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
-  const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
+export async function readJobSummary(key: string, eventLimit = 5): Promise<JobSummary> {
+  return summarizeRecord(await readJob(key), eventLimit);
+}
+
+async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobSummary> {
+  const events = await readJobEvents(job.key);
+  const ids = job.approvals.filter(approval => approval.status === "pending").map(approval => approval.id);
   return {
-    key: job.key,
-    jobIncarnation: job.jobIncarnation,
-    status: job.status,
-    nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
-    repo: job.repo,
-    prompt: job.prompt,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    startedAt: job.startedAt,
-    completedAt: job.completedAt,
-    workerId: job.workerId,
-    workerPid: job.workerPid,
-    threadId: job.threadId,
-    turnId: job.turnId,
-    cancelRequestedAt: job.cancelRequestedAt,
-    cancelCommandId: job.cancelCommandId,
-    pendingApprovals,
-    actionableApprovals,
-    canResolveApprovals,
-    approvalCounts: approvalCounts(job.approvals),
-    finalResponse: job.finalResponse,
-    error: job.error,
-    recentEvents,
+    key: job.key, status: job.status, repo: job.repo,
+    threadId: job.threadId, turnId: job.turnId,
+    createdAt: job.createdAt, startedAt: job.startedAt, completedAt: job.completedAt,
+    pendingApprovals: { count: ids.length, ids },
+    latestAgentMessage: Array.from(job.latestAgentMessage).slice(0, 2000).join(""),
+    finalResponse: job.finalResponse, error: job.error,
+    recentEvents: eventLimit <= 0 ? [] : events.slice(-eventLimit),
   };
 }
 
 export async function waitForJob(key: string, options: JobWaitOptions = {}): Promise<JobWaitResult> {
-  const eventLimit = options.eventLimit ?? 10;
+  const eventLimit = options.eventLimit ?? 5;
   const ignoredApprovalIds = options.ignoredApprovalIds ?? [];
   const intervalMs = options.intervalMs ?? 1000;
   const timeoutMs = options.timeoutMs ?? null;
@@ -631,8 +480,16 @@ export async function waitForJob(key: string, options: JobWaitOptions = {}): Pro
   const deadline = timeoutMs === null ? null : startedAt + timeoutMs;
 
   while (true) {
-    const summary = await readJobSummary(key, eventLimit);
-    const readyReason = readyReasonFor(summary, ignoredApprovalIds);
+    const job = await readJob(key);
+    const summary = await summarizeRecord(job, eventLimit);
+    const pending = isTerminalStatus(job.status)
+      ? await readNewCompleteLines(`${jobDir(key)}/control.jsonl`, job.controlOffset)
+      : { lines: [] };
+    const resumePending = pending.lines.some(line => {
+      const command = JSON.parse(line) as ControlCommand;
+      return command.type === "turn.steer" && command.resume;
+    });
+    const readyReason = resumePending ? null : readyReasonFor(summary, ignoredApprovalIds);
     const now = Date.now();
     if (readyReason) {
       return jobWaitResult(key, summary, true, readyReason, startedAt, now, intervalMs, ignoredApprovalIds, timeoutMs, deadline);
@@ -664,21 +521,21 @@ export async function enqueueApprovalDecisionAndWait(
 export async function enqueueSteer(key: string, prompt: string): Promise<TurnSteerCommand> {
   const dir = jobDir(key);
   const job = await readJob(key);
-  if (job.status !== "running") {
-    throw new Error(`Job '${key}' is ${job.status}; only running jobs can be steered`);
-  }
+  if (isTerminalStatus(job.status) && !job.threadId) throw new Error(`Job '${key}' has no threadId to resume`);
+  const pending = await readNewCompleteLines(`${dir}/control.jsonl`, job.controlOffset);
+  const resumeQueued = pending.lines.some(line => {
+    const command = JSON.parse(line) as ControlCommand;
+    return command.type === "turn.steer" && command.resume;
+  });
   const command: TurnSteerCommand = {
     id: crypto.randomUUID(),
     type: "turn.steer",
+    ...(isTerminalStatus(job.status) ? { resume: true as const } : {}),
     at: new Date().toISOString(),
     input: [{ type: "text", text: prompt }],
   };
   await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-  await appendEvent(dir, {
-    direction: "control",
-    command,
-    at: new Date().toISOString(),
-  });
+  if (isTerminalStatus(job.status) && !resumeQueued) spawnDetachedWorker(key, command.id);
   return command;
 }
 
@@ -727,11 +584,6 @@ export async function enqueueApprovalDecision(
     decision,
   };
   await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-  await appendEvent(dir, {
-    direction: "control",
-    command,
-    at: new Date().toISOString(),
-  });
   return command;
 }
 
@@ -746,7 +598,7 @@ async function waitForTurnCompletion(
   dir: string,
   processedControlIds: Set<string>,
 ): Promise<void> {
-  let controlOffset = 0;
+  let controlOffset = record.controlOffset;
   while (record.status === "running") {
     controlOffset = await processControlCommands(record, client, dir, processedControlIds, controlOffset);
     await Bun.sleep(250);
@@ -783,18 +635,20 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent): void {
   if (method === "item/started") {
     const itemType = getNestedString(params, ["item", "type"]);
     const phase = getNestedString(params, ["item", "phase"]);
+    if (itemType === "agentMessage") record.latestAgentMessage = "";
     if (itemType === "agentMessage" && phase === "final_answer") {
       record.finalResponse = "";
     }
   }
   if (method === "item/agentMessage/delta") {
     const delta = getNestedString(params, ["delta"]);
-    if (delta) record.finalResponse += delta;
+    if (delta) record.latestAgentMessage += delta;
   }
   if (method === "item/completed") {
     const itemType = getNestedString(params, ["item", "type"]);
     const phase = getNestedString(params, ["item", "phase"]);
     const text = getNestedString(params, ["item", "text"]);
+    if (itemType === "agentMessage" && text !== null) record.latestAgentMessage = text;
     if (itemType === "agentMessage" && phase === "final_answer" && text !== null) {
       record.finalResponse = text;
     }
@@ -820,8 +674,10 @@ async function processControlCommands(
   offset: number,
 ): Promise<number> {
   const result = await readNewCompleteLines(`${dir}/control.jsonl`, offset);
+  if (result.lines.length === 0) return result.offset;
   for (const line of result.lines) {
     const command = JSON.parse(line) as ControlCommand;
+    record.controlOffset += Buffer.byteLength(line + "\n");
     if (processedControlIds.has(command.id)) continue;
     processedControlIds.add(command.id);
     await appendEvent(dir, {
@@ -853,7 +709,7 @@ async function processControlCommands(
       record.cancelRequestedAt ??= command.at;
       record.cancelCommandId ??= command.id;
       record.updatedAt = new Date().toISOString();
-      await writeWorkerJobRecord(dir, record);
+      await writeJobRecord(dir, record);
       if (!record.threadId || !record.turnId) {
         await appendEvent(dir, {
           direction: "worker",
@@ -876,6 +732,7 @@ async function processControlCommands(
       await resolveApprovalCommand(record, client, dir, command);
     }
   }
+  await writeJobRecord(dir, record);
   return result.offset;
 }
 
@@ -902,7 +759,7 @@ async function resolveApprovalCommand(
     approval.resolvedAt = new Date().toISOString();
     approval.decision = command.decision;
     record.updatedAt = new Date().toISOString();
-    await writeWorkerJobRecord(dir, record);
+    await writeJobRecord(dir, record);
     await appendEvent(dir, {
       direction: "worker",
       event: { type: "approval.unsupported", commandId: command.id, approvalId: approval.id, method: approval.method, error: result.error },
@@ -916,7 +773,7 @@ async function resolveApprovalCommand(
   approval.decision = command.decision;
   approval.resolvedAt = new Date().toISOString();
   record.updatedAt = new Date().toISOString();
-  await writeWorkerJobRecord(dir, record);
+  await writeJobRecord(dir, record);
   await appendEvent(dir, {
     direction: "worker",
     event: { type: "approval.resolved", commandId: command.id, approvalId: approval.id, decision: command.decision },
@@ -1008,139 +865,19 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function writeJobRecordUnlocked(dir: string, record: JobRecord): Promise<void> {
-  await Bun.write(`${dir}/job.json`, JSON.stringify(record, null, 2) + "\n");
-}
-
-async function writeWorkerJobRecord(dir: string, record: JobRecord): Promise<void> {
-  await withJobRecordLock(dir, record.key, async () => {
-    await assertCurrentWorkerRecordUnlocked(dir, record);
-    await mergePersistedControlFields(dir, record);
-    await assertCurrentWorkerRecordUnlocked(dir, record);
-    await writeJobRecordUnlocked(dir, record);
+// Atomic replacement keeps CLI readers from observing a partially written JSON file.
+let recordWrite = Promise.resolve();
+function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
+  const json = JSON.stringify(record, null, 2) + "\n";
+  recordWrite = recordWrite.then(async () => {
+    await Bun.write(`${dir}/job.json.tmp`, json);
+    await rename(`${dir}/job.json.tmp`, `${dir}/job.json`);
   });
-}
-
-async function assertCurrentWorkerRecordUnlocked(dir: string, record: JobRecord): Promise<void> {
-  let latest: JobRecord;
-  try {
-    latest = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), record.key);
-  } catch (error) {
-    if (isErrorWithCode(error) && error.code === "ENOENT") {
-      throw new StaleWorkerWriteError(`job record for '${record.key}' no longer exists`);
-    }
-    throw error;
-  }
-  if (latest.workerId !== null && record.workerId !== null && latest.workerId !== record.workerId) {
-    throw new StaleWorkerWriteError(`worker ${record.workerId} is stale; current worker is ${latest.workerId}`);
-  }
-  if (latest.jobIncarnation !== null && latest.jobIncarnation !== record.jobIncarnation) {
-    throw new StaleWorkerWriteError(`job incarnation ${record.jobIncarnation ?? "legacy"} is stale; current incarnation is ${latest.jobIncarnation}`);
-  }
-}
-
-async function withJobRecordLock<T>(dir: string, key: string, work: () => Promise<T>): Promise<T> {
-  const lockDir = `${dir}/job.lock`;
-  for (let attempt = 0; attempt < JOB_RECORD_LOCK_ATTEMPTS; attempt++) {
-    const ownerToken = crypto.randomUUID();
-    try {
-      await mkdir(lockDir);
-      await Bun.write(`${lockDir}/owner.json`, JSON.stringify({
-        token: ownerToken,
-        pid: process.pid,
-        createdAt: new Date().toISOString(),
-      }, null, 2) + "\n");
-      try {
-        return await work();
-      } finally {
-        await rm(lockDir, { recursive: true, force: true });
-      }
-    } catch (error) {
-      if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
-      if (await breakStaleJobRecordLock(lockDir)) continue;
-      await sleep(JOB_RECORD_LOCK_RETRY_MS);
-    }
-  }
-  throw new JobOperationError("job_state_changed", `Job '${key}' job record is locked by another writer`);
-}
-
-async function breakStaleJobRecordLock(lockDir: string): Promise<boolean> {
-  try {
-    const ownerText = await Bun.file(`${lockDir}/owner.json`).text();
-    const owner = JSON.parse(ownerText) as unknown;
-    if (!isObject(owner)) return await breakStaleJobRecordLockByMtime(lockDir, ownerText);
-    const pid = typeof owner.pid === "number" ? owner.pid : null;
-    const createdAt = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : Number.NaN;
-    const age = Number.isFinite(createdAt) ? Date.now() - createdAt : Number.POSITIVE_INFINITY;
-    if ((pid !== null && !isProcessAlive(pid)) || age > JOB_RECORD_LOCK_STALE_MS) {
-      if (!await jobRecordLockOwnerStillMatches(lockDir, ownerText)) return false;
-      await rm(lockDir, { recursive: true, force: true });
-      return true;
-    }
-  } catch {
-    return await breakStaleJobRecordLockByMtime(lockDir, null);
-  }
-  return false;
-}
-
-async function breakStaleJobRecordLockByMtime(lockDir: string, expectedOwnerText: string | null): Promise<boolean> {
-  try {
-    const info = await stat(lockDir);
-    if (Date.now() - info.mtimeMs > JOB_RECORD_LOCK_STALE_MS) {
-      if (expectedOwnerText !== null && !await jobRecordLockOwnerStillMatches(lockDir, expectedOwnerText)) return false;
-      await rm(lockDir, { recursive: true, force: true });
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
-async function jobRecordLockOwnerStillMatches(lockDir: string, expectedOwnerText: string): Promise<boolean> {
-  try {
-    return await Bun.file(`${lockDir}/owner.json`).text() === expectedOwnerText;
-  } catch {
-    return false;
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function mergePersistedControlFields(dir: string, record: JobRecord): Promise<void> {
-  try {
-    const latest = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), record.key);
-    record.cancelRequestedAt = latest.cancelRequestedAt ?? record.cancelRequestedAt;
-    record.cancelCommandId = latest.cancelCommandId ?? record.cancelCommandId;
-  } catch {
-    return;
-  }
+  return recordWrite;
 }
 
 async function readPersistedJobRecord(dir: string, key: string): Promise<JobRecord> {
-  const record = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), key);
-  await overlayCancelRequest(record, dir);
-  return record;
-}
-
-async function overlayCancelRequest(record: JobRecord, dir: string): Promise<void> {
-  const file = Bun.file(`${dir}/control.jsonl`);
-  if (!(await file.exists())) return;
-  try {
-    const text = await file.text();
-    for (const line of text.split("\n")) {
-      if (line.trim().length === 0) continue;
-      const command = JSON.parse(line) as Partial<ControlCommand>;
-      if (command.type !== "turn.interrupt") continue;
-      if (typeof command.at === "string") record.cancelRequestedAt = command.at;
-      if (typeof command.id === "string") record.cancelCommandId = command.id;
-      return;
-    }
-  } catch {
-    return;
-  }
+  return normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), key);
 }
 
 function summarizeJob(job: JobRecord): JobListItem {
@@ -1169,25 +906,11 @@ function isTerminalStatus(status: JobStatus | "unreadable"): status is "complete
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
-function approvalCounts(approvals: ApprovalRecord[]): Record<ApprovalStatus, number> {
-  const counts: Record<ApprovalStatus, number> = {
-    approved: 0,
-    cancelled: 0,
-    pending: 0,
-    rejected: 0,
-    unsupported: 0,
-  };
-  for (const approval of approvals) {
-    counts[approval.status]++;
-  }
-  return counts;
-}
-
 function nextAction(
   status: JobStatus,
   actionableApprovals: ApprovalRecord[],
   cancelRequestedAt: string | null = null,
-): JobSummary["nextAction"] {
+): JobNextAction {
   if (status === "running" && cancelRequestedAt) return "wait_cancel";
   if (actionableApprovals.length > 0) return "resolve_approval";
   if (status === "queued" || status === "running") return "wait";
@@ -1198,8 +921,8 @@ function nextAction(
 
 function readyReasonFor(summary: JobSummary, ignoredApprovalIds: string[]): JobWaitResult["reason"] | null {
   if (
-    summary.nextAction === "resolve_approval"
-    && summary.actionableApprovals.some((approval) => !ignoredApprovalIds.includes(approval.id))
+    summary.status === "running"
+    && summary.pendingApprovals.ids.some(id => !ignoredApprovalIds.includes(id))
   ) {
     return "approval_required";
   }
@@ -1229,7 +952,6 @@ function jobWaitResult(
     timeoutMs,
     deadlineAt: deadline === null ? null : new Date(deadline).toISOString(),
     status: summary.status,
-    nextAction: summary.nextAction,
     summary,
   };
 }
@@ -1257,6 +979,9 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     cancelRequestedAt: typeof value.cancelRequestedAt === "string" ? value.cancelRequestedAt : null,
     cancelCommandId: typeof value.cancelCommandId === "string" ? value.cancelCommandId : null,
     approvals: Array.isArray(value.approvals) ? value.approvals as ApprovalRecord[] : [],
+    latestAgentMessage: typeof value.latestAgentMessage === "string" ? value.latestAgentMessage : "",
+    controlOffset: typeof value.controlOffset === "number" ? value.controlOffset : 0,
+    resumeCommandId: typeof value.resumeCommandId === "string" ? value.resumeCommandId : null,
     finalResponse: typeof value.finalResponse === "string" ? value.finalResponse : "",
     error: typeof value.error === "string" ? value.error : null,
   };

@@ -25,7 +25,7 @@ type Args = {
 
 class CliError extends Error {
   constructor(
-    readonly code: "usage_error" | "invalid_flag" | "missing_json_flag",
+    readonly code: "usage_error" | "invalid_flag",
     message: string,
     readonly exitCode = 2,
   ) {
@@ -43,7 +43,6 @@ const knownPublicFlags = [
   "dry-run",
   "help",
   "interval-ms",
-  "json",
   "key",
   "prompt",
   "repo",
@@ -56,53 +55,45 @@ export async function main(argv: string[]): Promise<void> {
   const [resource, action, key, extra] = args.positionals;
 
   if (booleanFlag(args, "help") || resource === "help") {
-    if (jsonFlag(args)) {
-      await printJson({ usage: usageText() });
-    } else {
-      await printText(usageText());
-    }
+    await printJson({ usage: usageText() });
     return;
   }
 
   allowFlags(args, knownPublicFlags);
-  requireJsonForPublicCommand(args);
 
   if (resource === "job" && action === "run") {
-    allowFlags(args, ["json", "key", "repo", "prompt", "force", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["key", "repo", "prompt", "force"]);
     await printJson(await runJob({
       key: requiredString(args, "key"),
       repo: stringFlag(args, "repo") ?? ".",
       prompt: requiredString(args, "prompt"),
       force: booleanFlag(args, "force"),
-      eventLimit: eventLimitFlag(args),
-      intervalMs: intervalMsFlag(args),
-      timeoutMs: numberFlag(args, "timeout-ms"),
     }));
     return;
   }
 
   if (resource === "job" && action === "notify" && key) {
     requirePositionalCount(args, 3);
-    allowFlags(args, ["json"]);
+    allowFlags(args, []);
     await printJson(await notifyJob(key));
     return;
   }
 
   if (resource === "job" && action === "list") {
-    allowFlags(args, ["json"]);
+    allowFlags(args, []);
     await printJson(await listJobs());
     return;
   }
 
   if (resource === "job" && action === "summary" && key) {
-    allowFlags(args, ["json", "events"]);
+    allowFlags(args, ["events"]);
     await printJson(await readJobSummary(key, eventLimitFlag(args)));
     return;
   }
 
   if (resource === "job" && action === "wait" && key) {
     requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["events", "interval-ms", "timeout-ms"]);
     await printJson(await waitForJob(key, {
       eventLimit: eventLimitFlag(args),
       intervalMs: intervalMsFlag(args),
@@ -112,7 +103,7 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "events" && key) {
-    allowFlags(args, ["json", "format"]);
+    allowFlags(args, ["format"]);
     eventFormatFlag(args);
     for (const event of await readJobEvents(key)) {
       console.log(JSON.stringify(event));
@@ -121,7 +112,7 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "steer" && key) {
-    allowFlags(args, ["json", "prompt", "wait", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["prompt", "wait", "events", "interval-ms", "timeout-ms"]);
     const prompt = requiredString(args, "prompt");
     if (booleanFlag(args, "wait")) {
       await printJson(await enqueueSteerAndWait(key, prompt, waitOptionsFromFlags(args)));
@@ -132,7 +123,7 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "cancel" && key) {
-    allowFlags(args, ["json", "wait", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["wait", "events", "interval-ms", "timeout-ms"]);
     if (booleanFlag(args, "wait")) {
       await printJson(await cancelJobAndWait(key, waitOptionsFromFlags(args)));
     } else {
@@ -143,25 +134,25 @@ export async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "rm" && key) {
     requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "force", "dry-run"]);
+    allowFlags(args, ["force", "dry-run"]);
     await printJson(await removeJob(key, { force: booleanFlag(args, "force"), dryRun: booleanFlag(args, "dry-run") }));
     return;
   }
 
   if (resource === "approval" && action === "list" && key) {
-    allowFlags(args, ["json", "all"]);
+    allowFlags(args, ["all"]);
     await printJson(await readApprovals(key, booleanFlag(args, "all")));
     return;
   }
 
   if (resource === "approval" && action === "show" && key && extra) {
-    allowFlags(args, ["json"]);
+    allowFlags(args, []);
     await printJson(await readApproval(key, extra));
     return;
   }
 
   if (resource === "approval" && action === "approve" && key && extra) {
-    allowFlags(args, ["json", "for-session", "wait", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["for-session", "wait", "events", "interval-ms", "timeout-ms"]);
     const decision = booleanFlag(args, "for-session") ? "approveForSession" : "approve";
     if (booleanFlag(args, "wait")) {
       const waitOptions = waitOptionsFromFlags(args);
@@ -173,7 +164,7 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "approval" && action === "reject" && key && extra) {
-    allowFlags(args, ["json", "cancel", "wait", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["cancel", "wait", "events", "interval-ms", "timeout-ms"]);
     const decision = booleanFlag(args, "cancel") ? "cancel" : "reject";
     if (booleanFlag(args, "wait")) {
       const waitOptions = waitOptionsFromFlags(args);
@@ -206,6 +197,7 @@ export function parseArgs(argv: string[]): Args {
     const flag = arg.slice(2);
     const equalsIndex = flag.indexOf("=");
     const name = equalsIndex >= 0 ? flag.slice(0, equalsIndex) : flag;
+    if (name === "json") continue;
     if (!name) throw new CliError("invalid_flag", "Flag name cannot be empty");
     if (equalsIndex >= 0) {
       flags.set(name, flag.slice(equalsIndex + 1));
@@ -229,11 +221,6 @@ function stringFlag(args: Args, name: string): string | null {
 
 function booleanFlag(args: Args, name: string): boolean {
   return args.flags.get(name) === true;
-}
-
-function jsonFlag(args: Args): boolean {
-  const value = args.flags.get("json");
-  return value === true || value === "true";
 }
 
 function allowFlags(args: Args, allowed: string[]): void {
@@ -271,7 +258,7 @@ function intervalMsFlag(args: Args): number {
 }
 
 function eventLimitFlag(args: Args): number {
-  return nonNegativeIntegerFlag(args, "events", 10);
+  return nonNegativeIntegerFlag(args, "events", 5);
 }
 
 function waitOptionsFromFlags(args: Args): { eventLimit: number; intervalMs: number; timeoutMs: number | null } {
@@ -318,48 +305,31 @@ async function printJson(value: unknown): Promise<void> {
   await Bun.write(Bun.stdout, JSON.stringify(value, null, 2) + "\n");
 }
 
-async function printText(value: string): Promise<void> {
-  await Bun.write(Bun.stdout, value.endsWith("\n") ? value : value + "\n");
-}
-
-function requireJsonForPublicCommand(args: Args): void {
-  if (jsonFlag(args)) return;
-  if (args.positionals[0] === "internal") return;
-  throw new CliError("missing_json_flag", "Public commands require --json for machine-readable output");
-}
-
 function usageText(): string {
   return `Usage:
-  codexctl job run --repo . --key <key> --prompt <prompt> [--force] [--events <n>] [--timeout-ms <ms>] --json
-  codexctl job notify <key> --json
-  codexctl job list --json
-  codexctl job summary <key> [--events <n>] --json
-  codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
-  codexctl job events <key> [--format raw] --json
-  codexctl job steer <key> --prompt <prompt> [--wait] --json
-  codexctl job cancel <key> [--wait] --json
-  codexctl job rm <key> [--force] [--dry-run] --json
-  codexctl approval list <job-key> [--all] --json
-  codexctl approval show <job-key> <approval-id> --json
-  codexctl approval approve <job-key> <approval-id> [--for-session] [--wait] --json
-  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait] --json`;
+  codexctl job run --repo . --key <key> --prompt <prompt> [--force]
+  codexctl job notify <key>
+  codexctl job list
+  codexctl job summary <key> [--events <n>]
+  codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>]
+  codexctl job events <key> [--format raw]
+  codexctl job steer <key> --prompt <prompt> [--wait]
+  codexctl job cancel <key> [--wait]
+  codexctl job rm <key> [--force] [--dry-run]
+  codexctl approval list <job-key> [--all]
+  codexctl approval show <job-key> <approval-id>
+  codexctl approval approve <job-key> <approval-id> [--for-session] [--wait]
+  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]`;
 }
 
 if (import.meta.main) {
   main(Bun.argv.slice(2)).catch(async (error) => {
     const exitCode = errorExitCode(error);
     const message = error instanceof Error ? error.message : String(error);
-    if (argvWantsJson(Bun.argv.slice(2))) {
-      await Bun.write(Bun.stderr, JSON.stringify({
-        ok: false,
-        error: {
-          code: errorCode(error),
-          message,
-        },
-      }, null, 2) + "\n");
-    } else {
-      await Bun.write(Bun.stderr, message.endsWith("\n") ? message : message + "\n");
-    }
+    await Bun.write(Bun.stderr, JSON.stringify({
+      ok: false,
+      error: { code: errorCode(error), message },
+    }, null, 2) + "\n");
     process.exit(exitCode);
   });
 }
@@ -381,8 +351,4 @@ function isCodedError(error: unknown): error is { code: string; exitCode?: numbe
     && error !== null
     && "code" in error
     && typeof (error as { code?: unknown }).code === "string";
-}
-
-function argvWantsJson(argv: string[]): boolean {
-  return argv.some((arg) => arg === "--json" || arg === "--json=true");
 }
