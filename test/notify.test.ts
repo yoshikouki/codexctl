@@ -41,7 +41,7 @@ for await (const line of console) {
   if (m.id === 92 && m.result) finish();
 }
 function finish() {
-  send({method:"item/completed",params:{item:{type:"agentMessage",phase:"final_answer",text:"完了😀".repeat(900)}}});
+  send({method:"item/completed",params:{item:{type:"agentMessage",phase:"final_answer",text:"Done😀".repeat(900)}}});
   for (let i=0;i<2;i++) send({method:"turn/completed",params:{turn:{status:process.env.TEST_MODE || "completed"}}});
 }
 `);

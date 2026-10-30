@@ -644,7 +644,7 @@ describe("event store", () => {
       process.chdir(tmp);
       await createJob({ key: "tail-test", repo: ".", prompt: "hello" });
       const path = ".codexctl/jobs/tail-test/events.jsonl";
-      const first = JSON.stringify({ message: "日本語" }) + "\n";
+      const first = JSON.stringify({ message: "English 😀" }) + "\n";
       const second = JSON.stringify({ message: "next" }) + "\n";
       await Bun.write(path, first + second.slice(0, -1));
       const firstRead = await readNewCompleteLines(path, 0);
