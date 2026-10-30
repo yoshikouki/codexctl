@@ -1,29 +1,29 @@
 ---
 name: codexctl
-description: 別の Codex に作業を委任する、バックグラウンドで実行する、複数の Codex ジョブを確認する依頼に使う。インストール済み Codex の app-server を codexctl 経由で操作する。
+description: Use to delegate work to another Codex, run it in the background, or check multiple Codex jobs. Controls the installed Codex's app-server through codexctl.
 ---
 
 # codexctl
 
-codexctl は Codex の薄い制御レイヤーです。サンドボックスと承認は `~/.codex/config.toml` を含む Codex 自身の設定に従います。Codex の設定を変更しないでください。
+codexctl is a thin control layer for Codex. Sandboxing and approvals follow Codex's own settings, including `~/.codex/config.toml`. Do not change Codex's configuration.
 
-## 始める
+## Get started
 
-1. `codexctl --help` でコマンドを確認する。CLI がなければ [setup.md](references/setup.md) を読む。
-2. ジョブの key を決め、プロンプトに目的・対象・変更の可否・制約・期待する報告を含める。
-3. 編集を並列に行うときは、ジョブごとに worktree を用意する。[workflows.md](references/workflows.md) を参照する。
+1. Check commands with `codexctl --help`. If the CLI is unavailable, read [setup.md](references/setup.md).
+2. Choose a key for the job. Include the goal, target, whether changes are allowed, constraints, and expected report in the prompt.
+3. For parallel edits, prepare a worktree per job. See [workflows.md](references/workflows.md).
 
 ```sh
-codexctl job run --repo . --key review --prompt "このリポジトリをレビューして問題点を報告してください。ファイルは変更しないでください。"
+codexctl job run --repo . --key review --prompt "Review this repository and report issues. Do not modify files."
 codexctl job wait review --timeout-ms 600000
 ```
 
-`job run` は queued レコードを返します。steer・cancel の受付後も、待機結果は `job wait` から読みます。
+`job run` returns a queued record. After steer or cancel is accepted, use `job wait` to read the result.
 
-- `reason: "terminal"`: `summary.status` と `summary.finalResponse` または `summary.error` を確認して報告する。
-- `reason: "approval_required"`: `approval list` で内容を確認し、ユーザーの指示や承認方針に従って判断する。無条件に承認しない。
-- `reason: "timeout"`: ジョブは継続する。`job summary` で状態を確認するか、再度 `job wait` で待つ。
+- `reason: "terminal"`: inspect and report `summary.status` and `summary.finalResponse` or `summary.error`.
+- `reason: "approval_required"`: inspect the request with `approval list` and decide according to the user's instructions and policy for approvals. Do not approve unconditionally.
+- `reason: "timeout"`: execution continues. Check `job summary` or wait again with `job wait`.
 
-状態は `~/.codexctl/jobs/<key>/`、または `CODEXCTL_HOME` 配下の `jobs/<key>/` にあります。終了済みジョブには `job steer` で同じ thread の続きを依頼できます。`threadId` がない場合は新規ジョブにします。
+State is in `~/.codexctl/jobs/<key>/`, or `jobs/<key>/` under `CODEXCTL_HOME`. Use `job steer` to continue the same thread of a finished job. Without a `threadId`, create a new job.
 
-通知は `CODEXCTL_GROK_BOT_NOTIFY_URL` と `CODEXCTL_GROK_BOT_NOTIFY_KEY` を環境変数から読むだけです。値を文書やプロンプトに書かないでください。通知の詳細と JSON 出力はリポジトリの [README](../../README.md#通知) と [契約文書](../../docs/codexctl-agent-contract.md) を参照してください。
+Notifications only read `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` from the environment. Do not put their values in documents or prompts. See the repository's [README](../../README.md#notifications) and [agent contract](../../docs/codexctl-agent-contract.md) for notification details and JSON output.

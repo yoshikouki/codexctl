@@ -1,69 +1,69 @@
 # codexctl
 
-インストール済みの Codex を app-server 経由で動かす、薄い制御レイヤーです。ジョブをバックグラウンドで実行し、JSON で状態を確認したり、追加指示や承認を送ったりできます。
+A thin control layer for running an installed Codex through app-server. Run jobs in the background, inspect their state as JSON, and send follow-up instructions or decisions on approvals.
 
-サンドボックスと承認は `~/.codex/config.toml` を含む Codex 自身の設定に従います。codexctl は Codex のコードや設定を書き換えず、モデル・ネットワーク・認証の設定も上書きしません。
+Sandboxing and approvals follow Codex's own settings, including `~/.codex/config.toml`. codexctl does not modify Codex's code or configuration, or override model, network, or authentication settings.
 
-## 実行する
+## Run
 
-Bun と app-server を利用できる Codex が必要です。リポジトリからの起動は次のとおりです。
+Requires Bun and an installed Codex with app-server support. To run from the repository:
 
 ```sh
 bun run src/cli.ts --help
-bun run src/cli.ts job run --repo . --key demo --prompt "このリポジトリの構成を説明してください。ファイルは変更しないでください。"
+bun run src/cli.ts job run --repo . --key demo --prompt "Explain this repository's structure. Do not modify files."
 bun run src/cli.ts job wait demo --timeout-ms 600000
 ```
 
-`job run` は detached worker を起動し、`queued` レコードをすぐ返します。`job wait` は終了・承認待ち・タイムアウトのいずれかで返ります。CLI をインストール済みなら、`bun run src/cli.ts` の代わりに `codexctl` を使えます。
+`job run` starts a detached worker and immediately returns a `queued` record. `job wait` returns on completion, a request for approval, or timeout. If the CLI is installed, use `codexctl` instead of `bun run src/cli.ts`.
 
-出力は JSON、エラーは stderr の JSON です。`job events` は保存済みイベントを raw JSONL で出力します。コマンドと出力の一覧は [エージェント向け契約](docs/codexctl-agent-contract.md) にあります。
+Output is JSON; errors are JSON on stderr. `job events` outputs saved events as raw JSONL. See the [agent contract](docs/codexctl-agent-contract.md) for commands and output formats.
 
-## 状態と追加指示
+## State and follow-up instructions
 
-状態は `~/.codexctl/jobs/<key>/` に保存します。`CODEXCTL_HOME` を指定すると、その配下の `jobs/<key>/` を使います。key は同じ home 内で一意です。作業ディレクトリを移動しても同じ key を参照できます。
+State is stored in `~/.codexctl/jobs/<key>/`, or `jobs/<key>/` under `CODEXCTL_HOME` if set. Keys are unique within the same home. You can reference the same key after changing your working directory.
 
 ```sh
 codexctl job summary demo --events 0
-codexctl job steer demo --prompt "設定ファイルについても説明してください。"
+codexctl job steer demo --prompt "Also explain the configuration files."
 codexctl job wait demo --timeout-ms 600000
 ```
 
-`completed`・`failed`・`cancelled` のジョブへの `steer` は、同じ `threadId` で新しい turn を開始します。`threadId` がないジョブは再開できないため、新しい key で作成します。
+Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the same `threadId`. Jobs without a `threadId` cannot resume; instead, use a new key to create a job.
 
-## worktree で並列作業する
+## Parallel work with worktrees
 
-ジョブごとに `~/src/worktrees/github.com/<owner>/<repo>/<key>` とブランチ `codex/<key>` を用意し、そのパスを `--repo` に渡します。worktree は呼び出し側が Git で作成します。
+For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and pass that path to `--repo`. The caller creates worktrees with Git.
 
-このリポジトリで、未使用の key とブランチを使う例です。
+Example for this repository, using unused keys and branches:
 
 ```sh
 mkdir -p "$HOME/src/worktrees/github.com/yoshikouki/codexctl"
 git worktree add -b codex/docs-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" HEAD
 git worktree add -b codex/tests-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" HEAD
-codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" --key docs-review --prompt "文書をレビューし、不一致を報告してください。変更はしないでください。"
-codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" --key tests-review --prompt "テストをレビューし、不足を報告してください。変更はしないでください。"
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" --key docs-review --prompt "Review the documentation and report inconsistencies. Do not modify files."
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" --key tests-review --prompt "Review the tests and report gaps. Do not modify files."
 codexctl job list
 codexctl job wait docs-review --timeout-ms 600000
 codexctl job wait tests-review --timeout-ms 600000
 ```
 
-## 通知
+## Notifications
 
-`CODEXCTL_GROK_BOT_NOTIFY_URL` と `CODEXCTL_GROK_BOT_NOTIFY_KEY` は環境変数から読むだけで、通知処理は保存しません。自動通知は worker が起動時に引き継いだ環境、`job notify` は呼び出し元の環境を使います。
+codexctl only reads `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` from the environment and never stores them. Automatic notifications use the environment of the process that starts the worker: `job run`, or `job steer` on a finished job, which restarts the worker. `job notify` uses the caller's environment.
 
-- worker が終了状態に達すると `job.completed`・`job.failed`・`job.cancelled` を送ります。再開後の終了も対象です。
-- 承認要求では worker 内の承認 ID ごとに一度 `approval.requested` を送ります。
-- `codexctl job notify demo` は現在の状態を `job.status` として一度送ります。
-- URL がなければ自動通知の契機ごとに一度、`notify.skipped`（`reason: "not_configured"`）を記録します。URL があって key がなければ送信せず、`missing_key` を記録します。
+- When the worker reaches a terminal state, it sends `job.completed`, `job.failed`, or `job.cancelled`. This also applies after resuming a job.
+- Approval requests send `approval.requested` once per approval ID within the worker.
+- `codexctl job notify demo` sends the current state once as `job.status`.
+- If the URL is missing, each automatic notification trigger records one `notify.skipped` event with `reason: "not_configured"`. If the URL is set but the key is missing, nothing is sent and `missing_key` is recorded.
 
-JSON POST に `Content-Type: application/json` と Bearer 認証を使います。payload は `source: "codexctl"`、`event`、`key`、`status`、`repo`、`threadId`、`turnId`、ISO 時刻の `at`、`finalResponse` です。`threadId` と `turnId` は null の場合があります。`finalResponse` は最大 2,000 Unicode コードポイントで、`approval.requested` だけに `approvalId` を加えます。
+Notifications use JSON POST with `Content-Type: application/json` and Bearer authentication. The payload contains `source: "codexctl"`, `event`, `key`, `status`, `repo`, `threadId`, `turnId`, an ISO timestamp in `at`, and `finalResponse`. `threadId` and `turnId` may be null. `finalResponse` is limited to 2,000 Unicode code points. Only `approval.requested` includes `approvalId`.
 
-prompt・承認の params・error・環境変数は payload に含めません。通知 URL/key と一致する文字列は伏せますが、それ以外の秘密情報を自動判別する機能はありません。
+The payload excludes the prompt, params from approvals, error, and environment variables. Strings matching the notification URL or key are redacted; other secrets are not detected automatically.
 
-送信は10秒で打ち切り、再送もリダイレクト追従もしません。HTTP 200 を成功として `notify.sent`、失敗を `notify.failed` に記録します。通知失敗でジョブの状態は変わりません。イベントの記録自体に失敗した場合は記録を省略します。起動前のキャンセルも worker が処理すると通知しますが、worker の起動失敗では自動通知しません。
+Requests time out after 10 seconds, with no retries or redirect following. HTTP 200 records `notify.sent`; failures record `notify.failed`. Notification failures do not change the job's state. If recording the event itself fails, the record is omitted. Cancellation before startup also sends a notification when processed by the worker, but a worker startup failure does not send an automatic notification.
 
-`job summary` の `lastNotification` は最後の通知結果 `{ status: "sent" | "failed" | "skipped", at }` を返します（記録がなければ null、`--events 0` でも表示）。
+`job summary` returns the latest notification result in `lastNotification` as `{ status: "sent" | "failed" | "skipped", at }`, including `notify.skipped` when the URL is missing. It is null if no result is recorded and is included even with `--events 0`.
 
-## エージェント向けスキル
+## Agent skill
 
-[skills/codexctl/SKILL.md](skills/codexctl/SKILL.md) に委任・承認・再開の手順があります。スキルの管理ツールには `skills/codexctl/` を指定してください。
+[skills/codexctl/SKILL.md](skills/codexctl/SKILL.md) describes delegation, approvals, and resuming jobs. Point your skill manager at `skills/codexctl/`.

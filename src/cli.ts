@@ -308,7 +308,12 @@ function usageText(): string {
   codexctl approval list <job-key> [--all]
   codexctl approval show <job-key> <approval-id>
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait]
-  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]`;
+  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]
+
+Notifications: codexctl only reads CODEXCTL_GROK_BOT_NOTIFY_URL and CODEXCTL_GROK_BOT_NOTIFY_KEY from the environment and never stores them.
+Automatic notifications use the environment of the process that starts the worker: job run, or job steer on a finished job (which restarts the worker).
+job notify uses the caller's environment.
+When the URL is missing, the worker records notify.skipped, shown in job summary as lastNotification.`;
 }
 
 if (import.meta.main) {

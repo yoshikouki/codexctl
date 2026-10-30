@@ -1,77 +1,79 @@
-# codexctl エージェント向け契約
+# codexctl agent contract
 
-codexctl は、インストール済み Codex の app-server を操作する薄い制御レイヤーです。ジョブごとの detached worker が app-server と通信します。サンドボックス・承認は `~/.codex/config.toml` を含む Codex 自身の設定に従い、codexctl は設定を上書きしません。
+codexctl is a thin control layer for an installed Codex's app-server. A detached worker communicates with app-server for each job. Sandboxing and approvals follow Codex's own settings, including `~/.codex/config.toml`; codexctl does not override them.
 
-## コマンドと出力
+## Commands and output
 
-公開コマンドは `codexctl --help` で確認できます。help は `{ usage }`、通常の出力は JSON、エラーは stderr に `{ ok: false, error: { code, message } }` を出して非ゼロで終了します。`job events` だけは raw JSONL です。
+Use `codexctl --help` to list public commands. Help returns `{ usage }`. Normal output is JSON. Errors write `{ ok: false, error: { code, message } }` to stderr and exit with a nonzero code. Only `job events` outputs raw JSONL.
 
-表の `<key>`・`<prompt>`・`<id>` などは引数の表記です。
+Placeholders such as `<key>`, `<prompt>`, and `<id>` represent arguments.
 
-| コマンド | フラグ | JSON 出力の要点 |
+| Command | Flags | JSON output |
 | --- | --- | --- |
-| `codexctl job run` | 必須: `--key <key> --prompt <prompt>`。任意: `--repo <path> --force` | 初期の JobRecord。`status: "queued"`、`key`、`repo`、`prompt`、時刻、thread/turn ID、承認など。待機しない |
-| `codexctl job list` | なし | ジョブ一覧。`key`、`status`、`workerAlive`、承認件数、thread/turn ID、`error` など。更新日時の降順 |
-| `codexctl job summary <key>` | `--events <n>` | 下記の Summary |
-| `codexctl job wait <key>` | `--events <n> --interval-ms <ms> --timeout-ms <ms>` | 下記の Wait |
-| `codexctl job events <key>` | `--format raw` | 保存済みイベントを1行1件で出力して終了 |
-| `codexctl job steer <key>` | 必須: `--prompt <prompt>` | `id`、`type: "turn.steer"`、`at`、`input`。終了済みなら `resume: true` |
-| `codexctl job cancel <key>` | なし | `{ action, reason, job, command }`。`action` は `interrupt_queued` または `none` |
-| `codexctl job rm <key>` | `--force --dry-run` | `{ action, key, status, reason }`。`action` は `removed` または `would_remove` |
-| `codexctl job notify <key>` | なし | 送信成功時は `{ ok: true }`。未設定は `notify_not_configured`、送信失敗は `notify_failed` のエラー |
-| `codexctl approval list <key>` | `--all` | 承認レコードの配列。既定は pending のみ。`--all` で解決済みも含む |
-| `codexctl approval show <key> <id>` | なし | 承認レコード1件。`id`、`serverRequestId`、`method`、`params`、`status`、時刻、`decision`、`error` |
-| `codexctl approval approve <key> <id>` | `--for-session --wait` と待機用フラグ | `{ id, type: "approval.resolve", at, approvalId, decision }`。待機時は `{ command, wait }` |
-| `codexctl approval reject <key> <id>` | `--cancel --wait` と待機用フラグ | approve と同じ形。`decision` は `reject`、`--cancel` 指定時は `cancel` |
+| `codexctl job run` | Required: `--key <key> --prompt <prompt>`. Optional: `--repo <path> --force` | Initial JobRecord: `status: "queued"`, `key`, `repo`, `prompt`, timestamps, thread/turn IDs, approvals, etc. Does not wait |
+| `codexctl job list` | None | Jobs with `key`, `status`, `workerAlive`, counts of approvals, thread/turn IDs, `error`, etc. Sorted by update time, newest first |
+| `codexctl job summary <key>` | `--events <n>` | Summary below |
+| `codexctl job wait <key>` | `--events <n> --interval-ms <ms> --timeout-ms <ms>` | Wait below |
+| `codexctl job events <key>` | `--format raw` | Outputs saved events, one per line, then exits |
+| `codexctl job steer <key>` | Required: `--prompt <prompt>` | `id`, `type: "turn.steer"`, `at`, `input`. Includes `resume: true` for a finished job |
+| `codexctl job cancel <key>` | None | `{ action, reason, job, command }`. `action` is `interrupt_queued` or `none` |
+| `codexctl job rm <key>` | `--force --dry-run` | `{ action, key, status, reason }`. `action` is `removed` or `would_remove` |
+| `codexctl job notify <key>` | None | `{ ok: true }` on success. Errors: `notify_not_configured` if unconfigured, `notify_failed` if sending fails |
+| `codexctl approval list <key>` | `--all` | Array of records for approvals. Pending only by default; `--all` includes resolved records |
+| `codexctl approval show <key> <id>` | None | One record for an approval: `id`, `serverRequestId`, `method`, `params`, `status`, timestamps, `decision`, `error` |
+| `codexctl approval approve <key> <id>` | `--for-session --wait` and wait flags | `{ id, type: "approval.resolve", at, approvalId, decision }`. With waiting: `{ command, wait }` |
+| `codexctl approval reject <key> <id>` | `--cancel --wait` and wait flags | Same shape as approve. `decision` is `reject`, or `cancel` with `--cancel` |
 
-待機用フラグは `--events <n>`、`--interval-ms <ms>`、`--timeout-ms <ms>` です。`job wait`、または承認判断の `--wait` で使います。`--events` は0以上の整数で既定値5、間隔は正の整数で既定値1,000 ms、タイムアウトは正の整数で省略時は無期限です。
+Wait flags are `--events <n>`, `--interval-ms <ms>`, and `--timeout-ms <ms>`. Use them with `job wait` or `--wait` when deciding on an approval. `--events` is a non-negative integer, default 5. The interval is a positive integer, default 1,000 ms. The timeout is a positive integer; omitting it waits indefinitely.
 
 ### Summary
 
-`key`、`status`、`repo`、`threadId`、`turnId`、`createdAt`、`startedAt`、`completedAt`、`pendingApprovals: { count, ids }`、`latestAgentMessage`、`finalResponse`、`error`、`recentEvents` を返します。`latestAgentMessage` は最大 2,000 Unicode コードポイント、`finalResponse` は全文です。`--events 0` で `recentEvents` は空配列になります。
+Returns `key`, `status`, `repo`, `threadId`, `turnId`, `createdAt`, `startedAt`, `completedAt`, `pendingApprovals: { count, ids }`, `latestAgentMessage`, `finalResponse`, `error`, and `recentEvents`. `latestAgentMessage` is limited to 2,000 Unicode code points; `finalResponse` is the full text. `--events 0` makes `recentEvents` an empty array.
 
-`lastNotification` は最後の通知結果 `{ status: "sent" | "failed" | "skipped", at }`（記録がなければ null）で、`--events` に依存しません。
-自動通知で URL が未設定なら契機ごとに一度 `notify.skipped`（`reason: "not_configured"`）を記録します。通知 URL/key は記録せず、手動通知の `notify_not_configured` エラーは変わりません。
+`lastNotification` is the latest notification result, `{ status: "sent" | "failed" | "skipped", at }`, or null if none is recorded. It does not depend on `--events`.
+If the URL is missing, each automatic notification trigger records one `notify.skipped` event with `reason: "not_configured"`, shown in `lastNotification`. The notification URL and key are never recorded. Manual notifications still return the `notify_not_configured` error.
 
 ### Wait
 
-`key`、`ready`、`reason`、`status`、`summary`、`elapsedMs`、`intervalMs`、`ignoredApprovalIds`、`timeoutMs`、`deadlineAt` を返します。
+Returns `key`, `ready`, `reason`, `status`, `summary`, `elapsedMs`, `intervalMs`, `ignoredApprovalIds`, `timeoutMs`, and `deadlineAt`.
 
-- `reason: "terminal"`: completed・failed・cancelled のいずれか。`ready: true`。
-- `reason: "approval_required"`: running のジョブに未解決の承認がある。`ready: true`。
-- `reason: "timeout"`: 待機期限に達した。`ready: false`。CLI エラーではなく、ジョブも停止しません。
+- `reason: "terminal"`: completed, failed, or cancelled. `ready: true`.
+- `reason: "approval_required"`: pending approvals on a running job. `ready: true`.
+- `reason: "timeout"`: the wait deadline was reached. `ready: false`. This is not a CLI error and does not stop the job.
 
-承認判断の `--wait` は、いま送った承認 ID を待機対象から除外し、別の承認か終了を待ちます。ジョブの失敗と CLI の失敗は別なので、終了コードだけでなく `summary.status` と `summary.error` を確認してください。
+With `--wait`, the submitted approval's ID is excluded while waiting for completion or another approval. Job failure and CLI failure are separate: inspect `summary.status` and `summary.error`, not just the exit code.
 
-## 状態と操作
+## State and operations
 
-- 状態は `~/.codexctl/jobs/<key>/`。`CODEXCTL_HOME` で home を変更できます。key は同じ home 内で一意で、cwd に依存しません。`--repo` の既定値だけが呼び出し元の `.` です。
-- 保存ファイルは `job.json`、`events.jsonl`、`control.jsonl`、`worker.log`、`worker.err.log`。初期作成後の `job.json` 更新は worker だけが行い、ファイルを原子的に置換します。
-- steer・cancel・承認判断は `control.jsonl` に追記します。返却は受付を示し、適用完了は示しません。worker がいなければ処理されず、待機はタイムアウトし得ます。
-- cancel は割り込みをキューに入れます。起動前なら worker が app-server を起動せず cancelled にします。終了済みへの cancel は `action: "none"` です。
-- `job run` の `--force` は既存レコードとログを初期化します。生存中の worker があれば拒否します。
-- `job rm` はジョブの状態ディレクトリを削除します。通常は終了済みのみ、`--force` で終了していない記録や読めない記録も対象にできます。読めた記録に生存中の worker があれば、強制指定でも拒否します。worktree は削除しません。
+- State is stored in `~/.codexctl/jobs/<key>/`. Set `CODEXCTL_HOME` to change the home. Keys are unique within the same home and independent of cwd. Only the default `--repo` uses the caller's `.`.
+- Saved files are `job.json`, `events.jsonl`, `control.jsonl`, `worker.log`, and `worker.err.log`. After creation, only the worker updates `job.json`, replacing it atomically.
+- Steer, cancel, and decisions on approvals append to `control.jsonl`. A response confirms receipt, not application. Without a worker, commands are not processed and waits may time out.
+- Cancel queues an interrupt. Before startup, the worker sets the status to cancelled without starting app-server. Cancelling finished jobs returns `action: "none"`.
+- `job run` with `--force` resets the existing record and logs. It refuses if a worker is alive.
+- `job rm` deletes the job's state directory. Normally it accepts only finished jobs; `--force` also accepts unfinished or unreadable records. If a readable record has a live worker, removal is refused even with force. Worktrees are not removed.
 
-## 終了済みジョブへの steer
+## Steering finished jobs
 
-completed・failed・cancelled への `steer` は新しい worker を起動し、同じ `threadId` を再開して新しい turn を開始します。`threadId` がなければエラーになるので、新しい key でジョブを作成してください。
+Steering completed, failed, or cancelled jobs starts a new worker, resumes the same `threadId`, and starts a new turn. A missing `threadId` is an error; instead, use a new key to create a job.
 
-新しい worker は前の worker の終了（通知送信を含む）を待ちます。turn ごとの回答・エラー・承認を初期化し、処理済みの制御コマンドは再実行しません。再開受付後の `job wait` は、以前の終了結果を返さず再開後の結果を待ちます。
+The new worker waits for the previous worker to exit, including notification delivery. It resets turn-specific responses, errors, and approvals without replaying processed control commands. After a resume is accepted, `job wait` waits for the resumed result instead of returning the previous terminal result.
 
-steer・cancel の後は `job wait` を呼んで結果を確認します。
+After steering or cancelling, use `job wait` to check the result.
 
-## 承認
+## Approvals
 
-承認判断は running かつ pending の承認に送ります。自動承認はしません。`method` と `params` を確認してから判断してください。
+Send decisions for pending approvals on running jobs. codexctl does not approve automatically. Inspect `method` and `params` before deciding.
 
-コマンド・ファイル承認の approve は `accept`、reject は `decline`、cancel は `cancel` を返します。`--for-session` は `params.availableDecisions` にある `acceptWithExecpolicyAmendment` をそのまま使い、なければ `acceptForSession` を返します。
+For command and file approvals, approve returns `accept`, reject returns `decline`, and cancel returns `cancel`. `--for-session` uses `acceptWithExecpolicyAmendment` from `params.availableDecisions` unchanged when available; otherwise it returns `acceptForSession`.
 
-`execCommandApproval`・`applyPatchApproval` も現行スキーマに含まれます。approve は `approved`、`--for-session` は `approved_for_session`、reject は `{ denied: { rejection: "Rejected via codexctl" } }`、cancel は `abort` を返します。
+`execCommandApproval` and `applyPatchApproval` are also in the current schema. Approve returns `approved`, `--for-session` returns `approved_for_session`, reject returns `{ denied: { rejection: "Rejected via codexctl" } }`, and cancel returns `abort`.
 
-`item/permissions/requestApproval` では、要求された permissions をそのまま返し、通常は turn、`--for-session` では session の範囲で許可します。この承認への reject/cancel はエラーになります。
+For `item/permissions/requestApproval`, the requested permissions are returned unchanged, scoped to the turn by default or the session with `--for-session`. Reject and cancel are errors for this type of approval.
 
-## 並列作業と通知
+## Parallel work and notifications
 
-worktree は呼び出し側で `~/src/worktrees/github.com/<owner>/<repo>/<key>`、ブランチ `codex/<key>` として作成し、`job run` の `--repo` に渡します。各ジョブを開始してから、`job list` と各 key の `job wait` で結果を確認します。
+The caller creates each worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and passes it to `job run` with `--repo`. Start each job, then check results with `job list` and `job wait` for each key.
 
-通知の環境変数・送信契機・payload・10秒の期限・再送なしの仕様は [README の通知](../README.md#通知) を参照してください。
+codexctl only reads `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` from the environment and never stores them. Automatic notifications use the environment of the process that starts the worker: `job run`, or `job steer` on a finished job, which restarts the worker. `job notify` uses the caller's environment.
+
+See [Notifications in the README](../README.md#notifications) for notification triggers, payloads, the 10-second timeout, and the no-retry policy.

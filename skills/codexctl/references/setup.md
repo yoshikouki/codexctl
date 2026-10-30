@@ -1,18 +1,18 @@
-# セットアップ
+# Setup
 
-Bun と、app-server を利用できるインストール済み Codex が必要です。サンドボックス・承認・認証は Codex 自身の設定を使います。
+Requires Bun and an installed Codex with app-server support. Sandboxing, approvals, and authentication use Codex's own settings.
 
-## ソースから起動する
+## Run from source
 
-codexctl リポジトリのルートで実行します。
+Run at the root of the codexctl repository:
 
 ```sh
 bun install
 bun run src/cli.ts --help
 ```
 
-CLI がインストール済みなら `codexctl --help` を使います。help は JSON の `usage` を返します。ジョブを実行して Codex を起動する前に、作業内容と対象リポジトリを決めてください。
+If the CLI is installed, use `codexctl --help`. Help returns JSON with a `usage` field. Before starting Codex through a job, decide on the task and target repository.
 
-## スキルを配置する
+## Install the skill
 
-スキル管理ツールに `skills/codexctl/` を指定します。手順を更新するときはリポジトリ内の原本を編集し、管理ツールで再配置します。コマンドの仕様は `src/cli.ts` と実装を確認し、README・契約文書・スキルを揃えます。
+Point your skill manager at `skills/codexctl/`. To update the instructions, edit the originals in this repository and reinstall them through the manager. Check `src/cli.ts` and the implementation for command behavior, and keep the README, agent contract, and skill consistent.

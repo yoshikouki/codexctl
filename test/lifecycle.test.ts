@@ -116,13 +116,13 @@ for (const [serverStatus, status] of [["completed", "completed"], ["failed", "fa
   test(`steer resumes ${status} on same thread, waits for new turn and notifies again`, async () => {
     process.env.TEST_STATUS = serverStatus;
     await start();
-    await cli(["job", "steer", "demo", "--prompt", "old 日本語"]);
+    await cli(["job", "steer", "demo", "--prompt", "old English 😀"]);
     await until(async () => (await readJobEvents("demo") as any[]).some(e => e.message?.method === "turn/steer"));
     await Bun.write(process.env.TEST_RELEASE!, "");
     await until(async () => (await readJob("demo")).status === status);
     const previous = await readJob("demo");
     delete process.env.TEST_STATUS;
-    expect((await cli(["job", "steer", "demo", "--prompt", "new 日本語"])).code).toBe(0);
+    expect((await cli(["job", "steer", "demo", "--prompt", "new English 😀"])).code).toBe(0);
     const resumed = await cli(["job", "wait", "demo", "--interval-ms", "10", "--timeout-ms", "4000"]);
     expect(resumed.code).toBe(0);
     expect(resumed.value.reason).toBe("terminal");
@@ -133,7 +133,7 @@ for (const [serverStatus, status] of [["completed", "completed"], ["failed", "fa
     const requests = (await readJobEvents("demo") as any[]).filter(e => e.direction === "client" && e.message?.method).map(e => e.message);
     expect(requests.filter(m => m.method === "thread/start")).toHaveLength(1);
     expect(requests.filter(m => m.method === "thread/resume").map(m => m.params)).toEqual([{ threadId: "same-thread", cwd: join(tmp, "a") }]);
-    expect(requests.filter(m => m.method === "turn/start").map(m => m.params.input[0].text)).toEqual(["fixture", "new 日本語"]);
+    expect(requests.filter(m => m.method === "turn/start").map(m => m.params.input[0].text)).toEqual(["fixture", "new English 😀"]);
     expect(requests.filter(m => m.method === "turn/steer")).toHaveLength(1);
     expect(notifications.map(n => n.event)).toEqual([`job.${status}`, "job.completed"]);
   });
