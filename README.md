@@ -24,7 +24,8 @@ bun run src/cli.ts job wait demo --timeout-ms 600000
 
 ```sh
 codexctl job summary demo --events 0
-codexctl job steer demo --prompt "設定ファイルについても説明してください。" --wait --timeout-ms 600000
+codexctl job steer demo --prompt "設定ファイルについても説明してください。"
+codexctl job wait demo --timeout-ms 600000
 ```
 
 `completed`・`failed`・`cancelled` のジョブへの `steer` は、同じ `threadId` で新しい turn を開始します。`threadId` がないジョブは再開できないため、新しい key で作成します。

@@ -122,18 +122,13 @@ for (const [serverStatus, status] of [["completed", "completed"], ["failed", "fa
     await until(async () => (await readJob("demo")).status === status);
     const previous = await readJob("demo");
     delete process.env.TEST_STATUS;
-    const resumed = status === "completed"
-      ? await cli(["job", "steer", "demo", "--prompt", "new 日本語", "--wait", "--interval-ms", "10", "--timeout-ms", "4000"])
-      : await (async () => {
-        expect((await cli(["job", "steer", "demo", "--prompt", "new 日本語"])).code).toBe(0);
-        const result = await cli(["job", "wait", "demo", "--interval-ms", "10", "--timeout-ms", "4000"]);
-        return { code: result.code, value: { wait: result.value } };
-      })();
+    expect((await cli(["job", "steer", "demo", "--prompt", "new 日本語"])).code).toBe(0);
+    const resumed = await cli(["job", "wait", "demo", "--interval-ms", "10", "--timeout-ms", "4000"]);
     expect(resumed.code).toBe(0);
-    expect(resumed.value.wait.reason).toBe("terminal");
-    expect(resumed.value.wait.status).toBe("completed");
-    expect(resumed.value.wait.summary.turnId).not.toBe(previous.turnId);
-    expect(resumed.value.wait.summary.threadId).toBe(previous.threadId);
+    expect(resumed.value.reason).toBe("terminal");
+    expect(resumed.value.status).toBe("completed");
+    expect(resumed.value.summary.turnId).not.toBe(previous.turnId);
+    expect(resumed.value.summary.threadId).toBe(previous.threadId);
     await exited(2);
     const requests = (await readJobEvents("demo") as any[]).filter(e => e.direction === "client" && e.message?.method).map(e => e.message);
     expect(requests.filter(m => m.method === "thread/start")).toHaveLength(1);
@@ -168,13 +163,15 @@ test("queued cancel is written only by worker and starts no app-server", async (
 
 test("cancelled turn resumes without replaying its interrupt", async () => {
   await start();
-  const cancelled = await cli(["job", "cancel", "demo", "--wait", "--interval-ms", "10", "--timeout-ms", "4000"]);
-  expect(cancelled.value.wait.status).toBe("cancelled");
+  expect((await cli(["job", "cancel", "demo"])).code).toBe(0);
+  const cancelled = await cli(["job", "wait", "demo", "--interval-ms", "10", "--timeout-ms", "4000"]);
+  expect(cancelled.value.status).toBe("cancelled");
   const before = await readJob("demo");
   await Bun.write(process.env.TEST_RELEASE!, "");
-  const resumed = await cli(["job", "steer", "demo", "--prompt", "continue", "--wait", "--interval-ms", "10", "--timeout-ms", "4000"]);
-  expect(resumed.value.wait.status).toBe("completed");
-  expect(resumed.value.wait.summary.turnId).not.toBe(before.turnId);
+  expect((await cli(["job", "steer", "demo", "--prompt", "continue"])).code).toBe(0);
+  const resumed = await cli(["job", "wait", "demo", "--interval-ms", "10", "--timeout-ms", "4000"]);
+  expect(resumed.value.status).toBe("completed");
+  expect(resumed.value.summary.turnId).not.toBe(before.turnId);
   await exited(2);
   const job = await readJob("demo");
   expect(job.cancelRequestedAt).toBeNull();
