@@ -31,18 +31,6 @@ export function jobDir(key: string, repo = currentStateRepo()): string {
   return join(jobsRoot(repo), key);
 }
 
-export function supervisorDir(repo = currentStateRepo()): string {
-  return join(stateRoot(repo), "supervisor");
-}
-
-export function supervisorCursorDir(repo = currentStateRepo()): string {
-  return join(supervisorDir(repo), "cursors");
-}
-
-export function supervisorCursorPath(name: string, repo = currentStateRepo()): string {
-  return join(supervisorCursorDir(repo), `${name}.json`);
-}
-
 export function stateEnvForChild(): Record<string, string> {
   return {
     [CODEXCTL_STATE_REPO_ENV]: currentStateRepo(),

@@ -1,6 +1,4 @@
 #!/usr/bin/env bun
-import { readDaemonVersion } from "./app-server.ts";
-import { compactJobEvent } from "./events.ts";
 import {
   cancelJob,
   cancelJobAndWait,
@@ -11,37 +9,13 @@ import {
   listJobs,
   readApproval,
   readApprovals,
-  readJob,
   readJobEvents,
   readJobSummary,
-  readNewEventLines,
   removeJob,
-  pruneJobs,
-  reconcileJobs,
-  recoverJob,
   runJob,
   runJobWorker,
-  startJob,
-  sweepJobs,
   waitForJob,
-  workerHealth,
 } from "./job.ts";
-import {
-  ackSupervisorCursor,
-  applySupervisorAction,
-  inspectSupervisorAction,
-  nextSupervisorAction,
-  planSupervisorActions,
-  readSupervisorActionHistory,
-  readSupervisorEvents,
-  readSupervisorState,
-  readSupervisorInbox,
-  runSupervisor,
-  startSupervisor,
-  stopSupervisor,
-  waitForSupervisor,
-  type SupervisorActionKind,
-} from "./supervisor.ts";
 
 type Args = {
   positionals: string[];
@@ -60,13 +34,7 @@ class CliError extends Error {
 
 const knownPublicFlags = [
   "all",
-  "after-tick",
-  "approval-policy",
-  "action-id",
   "cancel",
-  "confirm",
-  "cursor",
-  "detach",
   "events",
   "for-session",
   "format",
@@ -75,19 +43,9 @@ const knownPublicFlags = [
   "help",
   "interval-ms",
   "json",
-  "keep",
-  "kind",
-  "limit",
   "key",
-  "max-ticks",
-  "model",
   "prompt",
   "repo",
-  "sandbox",
-  "status",
-  "supervisor-id",
-  "tick",
-  "ticks",
   "timeout-ms",
   "wait",
 ];
@@ -108,39 +66,12 @@ export async function main(argv: string[]): Promise<void> {
   allowFlags(args, knownPublicFlags);
   requireJsonForPublicCommand(args);
 
-  if (resource === "doctor") {
-    allowFlags(args, ["json"]);
-    await printJson({
-      ok: true,
-      daemon: await readDaemonVersion(),
-      appServerTransport: "stdio-jsonl",
-    });
-    return;
-  }
-
-  if (resource === "job" && action === "start") {
-    allowFlags(args, ["json", "key", "repo", "prompt", "model", "approval-policy", "sandbox", "force", "detach"]);
-    const jobKey = requiredString(args, "key");
-    const repo = stringFlag(args, "repo") ?? ".";
-    const prompt = requiredString(args, "prompt");
-    const model = stringFlag(args, "model") ?? undefined;
-    const approvalPolicy = approvalPolicyFlag(args);
-    const sandbox = sandboxFlag(args);
-    const force = booleanFlag(args, "force");
-    const detach = booleanFlag(args, "detach");
-    await printJson(await startJob({ key: jobKey, repo, prompt, model, approvalPolicy, sandbox, force, detach }));
-    return;
-  }
-
   if (resource === "job" && action === "run") {
-    allowFlags(args, ["json", "key", "repo", "prompt", "model", "approval-policy", "sandbox", "force", "events", "interval-ms", "timeout-ms"]);
+    allowFlags(args, ["json", "key", "repo", "prompt", "force", "events", "interval-ms", "timeout-ms"]);
     await printJson(await runJob({
       key: requiredString(args, "key"),
       repo: stringFlag(args, "repo") ?? ".",
       prompt: requiredString(args, "prompt"),
-      model: stringFlag(args, "model") ?? undefined,
-      approvalPolicy: approvalPolicyFlag(args),
-      sandbox: sandboxFlag(args),
       force: booleanFlag(args, "force"),
       eventLimit: eventLimitFlag(args),
       intervalMs: intervalMsFlag(args),
@@ -152,32 +83,6 @@ export async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "list") {
     allowFlags(args, ["json"]);
     await printJson(await listJobs());
-    return;
-  }
-
-  if (resource === "job" && action === "status" && key) {
-    allowFlags(args, ["json"]);
-    const job = await readJob(key);
-    await printJson({
-      key: job.key,
-      jobIncarnation: job.jobIncarnation,
-      status: job.status,
-      workerId: job.workerId,
-      workerGeneration: job.workerGeneration,
-      workerPid: job.workerPid,
-      workerHeartbeatAt: job.workerHeartbeatAt,
-      workerHealth: workerHealth(job),
-      threadId: job.threadId,
-      turnId: job.turnId,
-      updatedAt: job.updatedAt,
-      error: job.error,
-    });
-    return;
-  }
-
-  if (resource === "job" && action === "result" && key) {
-    allowFlags(args, ["json"]);
-    await printJson(await readJob(key));
     return;
   }
 
@@ -200,22 +105,10 @@ export async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "events" && key) {
     allowFlags(args, ["json", "format"]);
-    const format = eventFormatFlag(args);
+    eventFormatFlag(args);
     for (const event of await readJobEvents(key)) {
-      if (format === "raw") {
-        console.log(JSON.stringify(event));
-      } else {
-        for (const compact of compactJobEvent(event)) {
-          console.log(JSON.stringify(compact));
-        }
-      }
+      console.log(JSON.stringify(event));
     }
-    return;
-  }
-
-  if (resource === "job" && action === "watch" && key) {
-    allowFlags(args, ["json", "format"]);
-    await watchJob(key, eventFormatFlag(args));
     return;
   }
 
@@ -244,36 +137,6 @@ export async function main(argv: string[]): Promise<void> {
     requirePositionalCount(args, 3);
     allowFlags(args, ["json", "force", "dry-run"]);
     await printJson(await removeJob(key, { force: booleanFlag(args, "force"), dryRun: booleanFlag(args, "dry-run") }));
-    return;
-  }
-
-  if (resource === "job" && action === "prune") {
-    requirePositionalCount(args, 2);
-    allowFlags(args, ["json", "keep", "dry-run", "status"]);
-    await printJson(await pruneJobs({
-      keep: nonNegativeIntegerFlag(args, "keep", 10),
-      dryRun: booleanFlag(args, "dry-run"),
-      status: pruneStatusFlag(args),
-    }));
-    return;
-  }
-
-  if (resource === "job" && action === "recover" && key) {
-    allowFlags(args, ["json"]);
-    await printJson(await recoverJob(key));
-    return;
-  }
-
-  if (resource === "job" && action === "sweep") {
-    allowFlags(args, ["json"]);
-    await printJson(await sweepJobs());
-    return;
-  }
-
-  if (resource === "job" && action === "reconcile") {
-    requirePositionalCount(args, 2);
-    allowFlags(args, ["json", "dry-run"]);
-    await printJson(await reconcileJobs({ dryRun: booleanFlag(args, "dry-run") }));
     return;
   }
 
@@ -313,130 +176,9 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (resource === "supervisor" && action === "once") {
-    allowFlags(args, ["json", "interval-ms"]);
-    await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), once: true }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "start") {
-    allowFlags(args, ["json", "interval-ms", "max-ticks"]);
-    await printJson(await startSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "stop") {
-    allowFlags(args, ["json", "timeout-ms"]);
-    await printJson(await stopSupervisor({ timeoutMs: numberFlag(args, "timeout-ms") ?? undefined }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "plan") {
-    allowFlags(args, ["json"]);
-    await printJson(await planSupervisorActions());
-    return;
-  }
-
-  if (resource === "supervisor" && action === "actions") {
-    allowFlags(args, ["json", "ticks"]);
-    await printJson(await readSupervisorActionHistory(nonNegativeIntegerFlag(args, "ticks", 10)));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "wait") {
-    allowFlags(args, ["json", "after-tick", "interval-ms", "timeout-ms"]);
-    await printJson(await waitForSupervisor({
-      afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
-      intervalMs: intervalMsFlag(args),
-      timeoutMs: numberFlag(args, "timeout-ms"),
-    }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "next") {
-    allowFlags(args, ["json", "after-tick", "interval-ms", "timeout-ms", "max-ticks"]);
-    await printJson(await nextSupervisorAction({
-      afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
-      intervalMs: intervalMsFlag(args),
-      timeoutMs: numberFlag(args, "timeout-ms"),
-      startMaxTicks: numberFlag(args, "max-ticks") ?? undefined,
-    }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "inbox") {
-    allowFlags(args, ["json", "after-tick", "cursor", "interval-ms", "timeout-ms", "max-ticks", "limit"]);
-    await printJson(await readSupervisorInbox({
-      afterTick: optionalNonNegativeIntegerFlag(args, "after-tick"),
-      cursor: stringFlag(args, "cursor"),
-      intervalMs: intervalMsFlag(args),
-      timeoutMs: numberFlag(args, "timeout-ms"),
-      startMaxTicks: numberFlag(args, "max-ticks") ?? undefined,
-      limit: numberFlag(args, "limit") ?? undefined,
-    }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "ack" && key) {
-    requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "tick"]);
-    await printJson(await ackSupervisorCursor(key, requiredNonNegativeIntegerFlag(args, "tick")));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "inspect" && key) {
-    requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "kind", "action-id"]);
-    await printJson(await inspectSupervisorAction(key, supervisorActionKindFlag(args), {
-      actionId: stringFlag(args, "action-id"),
-    }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "apply" && key) {
-    requirePositionalCount(args, 3);
-    allowFlags(args, ["json", "kind", "confirm", "dry-run", "action-id"]);
-    await printJson(await applySupervisorAction(key, supervisorActionKindFlag(args), {
-      actionId: stringFlag(args, "action-id"),
-      confirm: stringFlag(args, "confirm"),
-      dryRun: booleanFlag(args, "dry-run"),
-    }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "run") {
-    allowFlags(args, ["json", "interval-ms", "max-ticks"]);
-    await printJson(await runSupervisor({ intervalMs: intervalMsFlag(args), maxTicks: numberFlag(args, "max-ticks") ?? undefined }));
-    return;
-  }
-
-  if (resource === "supervisor" && action === "status") {
-    allowFlags(args, ["json"]);
-    await printJson(await readSupervisorState());
-    return;
-  }
-
-  if (resource === "supervisor" && action === "events") {
-    allowFlags(args, ["json"]);
-    for (const event of await readSupervisorEvents()) {
-      console.log(JSON.stringify(event));
-    }
-    return;
-  }
-
   if (resource === "internal" && action === "worker" && key) {
     allowFlags(args, []);
     await runJobWorker(key);
-    return;
-  }
-
-  if (resource === "internal" && action === "supervisor") {
-    allowFlags(args, ["interval-ms", "max-ticks", "supervisor-id"]);
-    await runSupervisor({
-      intervalMs: intervalMsFlag(args),
-      maxTicks: numberFlag(args, "max-ticks") ?? undefined,
-      supervisorId: stringFlag(args, "supervisor-id") ?? undefined,
-    });
     return;
   }
 
@@ -509,47 +251,11 @@ function requirePositionalCount(args: Args, count: number): void {
   }
 }
 
-function approvalPolicyFlag(args: Args): "untrusted" | "on-failure" | "on-request" | "never" | undefined {
-  const value = stringFlag(args, "approval-policy");
-  if (value === null) return undefined;
-  if (value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never") return value;
-  throw new CliError("invalid_flag", "--approval-policy must be one of: untrusted, on-failure, on-request, never");
-}
-
-function sandboxFlag(args: Args): "read-only" | "workspace-write" | "danger-full-access" | undefined {
-  const value = stringFlag(args, "sandbox");
-  if (value === null) return undefined;
-  if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") return value;
-  throw new CliError("invalid_flag", "--sandbox must be one of: read-only, workspace-write, danger-full-access");
-}
-
-function eventFormatFlag(args: Args): "raw" | "compact" {
+function eventFormatFlag(args: Args): "raw" {
   const value = stringFlag(args, "format");
   if (value === null) return "raw";
-  if (value === "raw" || value === "compact") return value;
-  throw new CliError("invalid_flag", "--format must be one of: raw, compact");
-}
-
-function pruneStatusFlag(args: Args): "completed" | "failed" | "cancelled" | "terminal" | undefined {
-  const value = stringFlag(args, "status");
-  if (value === null) return undefined;
-  if (value === "completed" || value === "failed" || value === "cancelled" || value === "terminal") return value;
-  throw new CliError("invalid_flag", "--status must be one of: completed, failed, cancelled, terminal");
-}
-
-function supervisorActionKindFlag(args: Args): SupervisorActionKind {
-  const value = requiredString(args, "kind");
-  if (
-    value === "resolve_approval"
-    || value === "wait_cancel"
-    || value === "inspect_error"
-    || value === "inspect_stale_worker"
-    || value === "inspect_dead_worker"
-    || value === "inspect_unreadable"
-  ) {
-    return value;
-  }
-  throw new CliError("invalid_flag", "--kind must be one of: resolve_approval, wait_cancel, inspect_error, inspect_stale_worker, inspect_dead_worker, inspect_unreadable");
+  if (value === "raw") return value;
+  throw new CliError("invalid_flag", "--format must be raw");
 }
 
 function intervalMsFlag(args: Args): number {
@@ -584,18 +290,6 @@ function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): num
   return parsed;
 }
 
-function requiredNonNegativeIntegerFlag(args: Args, name: string): number {
-  if (!args.flags.has(name)) {
-    throw new CliError("usage_error", `Missing required --${name}`);
-  }
-  return nonNegativeIntegerFlag(args, name, 0);
-}
-
-function optionalNonNegativeIntegerFlag(args: Args, name: string): number | undefined {
-  if (!args.flags.has(name)) return undefined;
-  return nonNegativeIntegerFlag(args, name, 0);
-}
-
 function numberFlag(args: Args, name: string): number | null {
   const value = args.flags.get(name);
   if (value === undefined) return null;
@@ -628,63 +322,18 @@ function requireJsonForPublicCommand(args: Args): void {
 
 function usageText(): string {
   return `Usage:
-  codexctl doctor --json
-  codexctl job start --repo . --key <key> --prompt <prompt> [--detach] [--force] [--approval-policy <policy>] [--sandbox <mode>] --json
   codexctl job run --repo . --key <key> --prompt <prompt> [--force] [--events <n>] [--timeout-ms <ms>] --json
   codexctl job list --json
-  codexctl job status <key> --json
   codexctl job summary <key> [--events <n>] --json
   codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
-  codexctl job events <key> [--format raw|compact] --json
-  codexctl job watch <key> [--format raw|compact] --json
+  codexctl job events <key> [--format raw] --json
   codexctl job steer <key> --prompt <prompt> [--wait] --json
   codexctl job cancel <key> [--wait] --json
   codexctl job rm <key> [--force] [--dry-run] --json
-  codexctl job prune [--keep <n>] [--status completed|failed|cancelled|terminal] [--dry-run] --json
-  codexctl job recover <key> --json
-  codexctl job sweep --json
-  codexctl job reconcile [--dry-run] --json
   codexctl approval list <job-key> [--all] --json
   codexctl approval show <job-key> <approval-id> --json
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait] --json
-  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait] --json
-  codexctl supervisor once [--interval-ms <ms>] --json
-  codexctl supervisor start [--interval-ms <ms>] [--max-ticks <n>] --json
-  codexctl supervisor stop [--timeout-ms <ms>] --json
-  codexctl supervisor plan --json
-  codexctl supervisor actions [--ticks <n>] --json
-  codexctl supervisor wait [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] --json
-  codexctl supervisor next [--after-tick <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] --json
-  codexctl supervisor inbox [--after-tick <n>|--cursor <name>] [--interval-ms <ms>] [--timeout-ms <ms>] [--max-ticks <n>] [--limit <n>] --json
-  codexctl supervisor ack <cursor-name> --tick <n> --json
-  codexctl supervisor inspect <job-key> --kind <action-kind> [--action-id <id>] --json
-  codexctl supervisor apply <job-key> --kind <action-kind> [--action-id <id>] [--dry-run] [--confirm <token>] --json
-  codexctl supervisor run [--interval-ms <ms>] [--max-ticks <n>] --json
-  codexctl supervisor status --json
-  codexctl supervisor events --json
-  codexctl job result <key> --json`;
-}
-
-async function watchJob(key: string, format: "raw" | "compact"): Promise<void> {
-  let offset = 0;
-  while (true) {
-    const next = await readNewEventLines(key, offset);
-    offset = next.offset;
-    for (const line of next.lines) {
-      if (format === "raw") {
-        console.log(line);
-      } else {
-        for (const event of compactJobEvent(JSON.parse(line) as unknown)) {
-          console.log(JSON.stringify(event));
-        }
-      }
-    }
-    const job = await readJob(key);
-    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-      return;
-    }
-    await Bun.sleep(500);
-  }
+  codexctl approval reject <job-key> <approval-id> [--cancel] [--wait] --json`;
 }
 
 if (import.meta.main) {

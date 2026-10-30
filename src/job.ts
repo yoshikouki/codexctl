@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
-import { compactJobEvent, type CompactJobEvent } from "./events.ts";
+import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents } from "./events.ts";
 import { jobDir, jobsRoot, stateEnvForChild } from "./state.ts";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -23,18 +23,13 @@ export type JobRecord = {
   jobIncarnation: string | null;
   repo: string;
   prompt: string;
-  model: string | null;
-  approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
-  sandbox: "read-only" | "workspace-write" | "danger-full-access" | null;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
   workerId: string | null;
-  workerGeneration: number;
   workerPid: number | null;
-  workerHeartbeatAt: string | null;
   threadId: string | null;
   turnId: string | null;
   cancelRequestedAt: string | null;
@@ -81,74 +76,19 @@ export type TurnInterruptCommand = {
 
 export type ControlCommand = TurnSteerCommand | ApprovalResolveCommand | TurnInterruptCommand;
 
-export type StartJobOptions = {
+export type CreateJobOptions = {
   key: string;
   repo: string;
   prompt: string;
-  model?: string;
-  approvalPolicy?: JobRecord["approvalPolicy"];
-  sandbox?: NonNullable<JobRecord["sandbox"]>;
   force?: boolean;
-  detach?: boolean;
 };
 
-export type RunJobOptions = Omit<StartJobOptions, "detach"> & JobWaitOptions;
+export type RunJobOptions = CreateJobOptions & JobWaitOptions;
 
 export type JobRunResult = {
   key: string;
   started: JobRecord;
   wait: JobWaitResult;
-};
-
-export type JobRecoveryResult = {
-  action: "none" | "restarted" | "failed";
-  reason: string;
-  job: JobRecord;
-};
-
-export type JobRecoveryOptions = {
-  expectedRecoveryStateId?: string | null;
-};
-
-export type JobReconcileOptions = {
-  dryRun?: boolean;
-};
-
-export type JobReconcileDecision =
-  | "restart_queued"
-  | "restart_before_thread"
-  | "fail_in_flight_dead_worker"
-  | "skip_worker_alive"
-  | "skip_terminal"
-  | "skip_unreadable";
-
-export type JobReconcileItem = {
-  key: string;
-  jobIncarnation: string | null;
-  status: JobStatus | "unreadable";
-  decision: JobReconcileDecision;
-  reason: string;
-  mutates: boolean;
-  applied: boolean;
-  recoveryStateId: string | null;
-  workerId: string | null;
-  workerGeneration: number | null;
-  workerPid: number | null;
-  workerHealth: WorkerHealth | null;
-  threadId: string | null;
-  turnId: string | null;
-  result: JobRecoveryResult | null;
-  error: string | null;
-};
-
-export type JobReconcileReport = {
-  at: string;
-  dryRun: boolean;
-  scanned: number;
-  candidates: number;
-  mutations: number;
-  applied: number;
-  items: JobReconcileItem[];
 };
 
 export type JobCancelResult = {
@@ -170,23 +110,6 @@ export type JobRemoveResult = {
   reason: string;
 };
 
-export type JobPruneOptions = {
-  dryRun?: boolean;
-  keep?: number;
-  status?: JobPruneStatus;
-};
-
-export type JobPruneResult = {
-  scanned: number;
-  matched: number;
-  keep: number;
-  status: JobPruneStatus;
-  dryRun: boolean;
-  removed: JobRemoveResult[];
-};
-
-export type JobPruneStatus = "completed" | "failed" | "cancelled" | "terminal";
-
 export type JobListItem = {
   key: string;
   jobIncarnation: string | null;
@@ -194,11 +117,8 @@ export type JobListItem = {
   nextAction: JobNextAction | null;
   updatedAt: string | null;
   workerId: string | null;
-  workerGeneration: number | null;
   workerPid: number | null;
-  workerHeartbeatAt: string | null;
   workerAlive: boolean | null;
-  workerHealth: WorkerHealth | null;
   threadId: string | null;
   turnId: string | null;
   pendingApprovals: number;
@@ -216,17 +136,12 @@ export type JobSummary = {
   nextAction: JobNextAction;
   repo: string;
   prompt: string;
-  model: string | null;
-  approvalPolicy: JobRecord["approvalPolicy"];
-  sandbox: JobRecord["sandbox"];
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
   workerId: string | null;
-  workerGeneration: number;
   workerPid: number | null;
-  workerHealth: WorkerHealth;
   threadId: string | null;
   turnId: string | null;
   cancelRequestedAt: string | null;
@@ -237,8 +152,7 @@ export type JobSummary = {
   approvalCounts: Record<ApprovalStatus, number>;
   finalResponse: string;
   error: string | null;
-  diagnostics: JobSummaryDiagnostics;
-  recentEvents: CompactJobEvent[];
+  recentEvents: unknown[];
 };
 
 export type JobWaitOptions = {
@@ -277,49 +191,13 @@ export type CancelAndWaitResult = {
   wait: JobWaitResult;
 };
 
-export type WorkerHealth = {
-  pid: number | null;
-  alive: boolean;
-  heartbeatAt: string | null;
-  heartbeatAgeMs: number | null;
-  stale: boolean;
-  reason: "terminal" | "queued" | "no_worker_pid" | "alive_recent" | "alive_stale" | "dead";
-};
-
-export type JobSummaryDiagnostics = {
-  compactEventCount: number;
-  recentEventsLimit: number;
-  recentEventsTruncated: boolean;
-  warningCount: number;
-  mcpFailureCount: number;
-  appServerErrorCount: number;
-  commandCounts: {
-    started: number;
-    completed: number;
-    failed: number;
-  };
-  lastWarning: Extract<CompactJobEvent, { type: "warning" }> | null;
-  lastError: Extract<CompactJobEvent, { type: "app_server.error" }> | null;
-  lastFailedCommand: Extract<CompactJobEvent, { type: "command.completed" }> | null;
-};
-
-const WORKER_HEARTBEAT_INTERVAL_MS = 1_000;
-const WORKER_HEARTBEAT_STALE_MS = 30_000;
 const JOB_RECORD_LOCK_STALE_MS = 30_000;
 const JOB_RECORD_LOCK_RETRY_MS = 25;
 const JOB_RECORD_LOCK_ATTEMPTS = 80;
 
-export async function startJob(options: StartJobOptions): Promise<JobRecord> {
-  const record = await createJob(options);
-  if (options.detach) {
-    const dir = jobDir(record.key);
-    return await spawnDetachedWorker(record, dir, "start");
-  }
-  return await runJobWorker(record.key);
-}
-
 export async function runJob(options: RunJobOptions): Promise<JobRunResult> {
-  const started = await startJob({ ...options, detach: true });
+  const record = await createJob(options);
+  const started = await spawnDetachedWorker(record, jobDir(record.key));
   return {
     key: started.key,
     started,
@@ -329,68 +207,6 @@ export async function runJob(options: RunJobOptions): Promise<JobRunResult> {
       timeoutMs: options.timeoutMs,
     }),
   };
-}
-
-export async function recoverJob(key: string, options: JobRecoveryOptions = {}): Promise<JobRecoveryResult> {
-  const dir = jobDir(key);
-  const record = await readJob(key);
-  if (
-    options.expectedRecoveryStateId
-    && jobRecoveryStateId(record) !== options.expectedRecoveryStateId
-  ) {
-    throw new JobOperationError("job_state_changed", `Job '${key}' changed before recovery could be applied`);
-  }
-  if (record.status === "completed" || record.status === "failed" || record.status === "cancelled") {
-    return { action: "none", reason: `job is already ${record.status}`, job: record };
-  }
-  if (record.status === "queued") {
-    return { action: "restarted", reason: "queued job had no worker", job: await spawnDetachedWorker(record, dir, "recover") };
-  }
-  if (isProcessAlive(record.workerPid)) {
-    return { action: "none", reason: `worker ${record.workerPid} is alive`, job: record };
-  }
-  if (!record.threadId && !record.turnId) {
-    return { action: "restarted", reason: "worker died before starting a thread", job: await spawnDetachedWorker(record, dir, "recover") };
-  }
-
-  return await withJobRecordLock(dir, key, async () => {
-    const current = await readPersistedJobRecord(dir, key);
-    if (jobRecoveryStateId(current) !== jobRecoveryStateId(record)) {
-      throw new JobOperationError("job_state_changed", `Job '${key}' changed before recovery failure could be applied`);
-    }
-    current.status = "failed";
-    current.error = "worker process is not alive; in-flight app-server stdio sessions cannot be resumed";
-    current.completedAt = new Date().toISOString();
-    current.updatedAt = new Date().toISOString();
-    await writeJobRecordUnlocked(dir, current);
-    await appendEvent(dir, {
-      direction: "worker",
-      event: { type: "recovery.failed", reason: "in_flight_stdio_session_not_resumable", workerPid: current.workerPid },
-      at: new Date().toISOString(),
-    });
-    return { action: "failed", reason: "in-flight app-server stdio session cannot be resumed", job: current };
-  });
-}
-
-export function jobRecoveryStateId(job: {
-  jobIncarnation?: string | null;
-  updatedAt: string | null;
-  workerId?: string | null;
-  workerGeneration?: number | null;
-  workerPid: number | null;
-  threadId: string | null;
-  turnId: string | null;
-}): string {
-  return shortStableHash([job.jobIncarnation ?? null, job.updatedAt, job.workerId ?? null, job.workerGeneration ?? null, job.workerPid, job.threadId, job.turnId].join("\u0000"));
-}
-
-function shortStableHash(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 export async function listJobs(): Promise<JobListItem[]> {
@@ -410,11 +226,8 @@ export async function listJobs(): Promise<JobListItem[]> {
           nextAction: null,
           updatedAt: null,
           workerId: null,
-          workerGeneration: null,
           workerPid: null,
-          workerHeartbeatAt: null,
           workerAlive: null,
-          workerHealth: null,
           threadId: null,
           turnId: null,
           pendingApprovals: 0,
@@ -425,40 +238,6 @@ export async function listJobs(): Promise<JobListItem[]> {
       }
     }));
   return jobs.sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
-}
-
-export async function sweepJobs(): Promise<JobRecoveryResult[]> {
-  const report = await reconcileJobs();
-  return report.items.flatMap((item) => item.result ? [item.result] : []);
-}
-
-export async function reconcileJobs(options: JobReconcileOptions = {}): Promise<JobReconcileReport> {
-  const dryRun = options.dryRun ?? false;
-  const jobs = await listJobs();
-  const items: JobReconcileItem[] = [];
-  for (const job of jobs) {
-    const item = classifyJobReconciliation(job);
-    if (!item) continue;
-    if (!dryRun && item.mutates) {
-      try {
-        item.result = await recoverJob(job.key, { expectedRecoveryStateId: item.recoveryStateId });
-        item.applied = true;
-      } catch (error) {
-        item.error = error instanceof Error ? error.message : String(error);
-        throw error;
-      }
-    }
-    items.push(item);
-  }
-  return {
-    at: new Date().toISOString(),
-    dryRun,
-    scanned: jobs.length,
-    candidates: items.length,
-    mutations: items.filter((item) => item.mutates).length,
-    applied: items.filter((item) => item.applied).length,
-    items,
-  };
 }
 
 export async function removeJob(key: string, options: JobRemoveOptions = {}): Promise<JobRemoveResult> {
@@ -496,28 +275,6 @@ export async function removeJob(key: string, options: JobRemoveOptions = {}): Pr
     key,
     status,
     reason: options.dryRun ? "dry run" : "job record removed",
-  };
-}
-
-export async function pruneJobs(options: JobPruneOptions = {}): Promise<JobPruneResult> {
-  const keep = options.keep ?? 10;
-  const status = options.status ?? "completed";
-  const jobs = await listJobs();
-  const matchedJobs = jobs
-    .filter((job) => matchesPruneStatus(job.status, status))
-    .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
-  const candidates = matchedJobs.slice(keep);
-  const removed: JobRemoveResult[] = [];
-  for (const job of candidates) {
-    removed.push(await removeJob(job.key, { dryRun: options.dryRun }));
-  }
-  return {
-    scanned: jobs.length,
-    matched: matchedJobs.length,
-    keep,
-    status,
-    dryRun: options.dryRun ?? false,
-    removed,
   };
 }
 
@@ -606,7 +363,7 @@ export async function cancelJobAndWait(key: string, options: JobWaitOptions = {}
   };
 }
 
-export async function createJob(options: StartJobOptions): Promise<JobRecord> {
+export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
   const repo = normalizeRepo(options.repo);
   const dir = jobDir(options.key);
   await mkdir(dir, { recursive: true });
@@ -635,18 +392,13 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
       jobIncarnation: crypto.randomUUID(),
       repo,
       prompt: options.prompt,
-      model: options.model ?? null,
-      approvalPolicy: options.approvalPolicy ?? "on-request",
-      sandbox: options.sandbox ?? null,
       status: "queued",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       startedAt: null,
       completedAt: null,
       workerId: null,
-      workerGeneration: 0,
       workerPid: null,
-      workerHeartbeatAt: null,
       threadId: null,
       turnId: null,
       cancelRequestedAt: null,
@@ -660,19 +412,16 @@ export async function createJob(options: StartJobOptions): Promise<JobRecord> {
   });
 }
 
-async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "start" | "recover"): Promise<JobRecord> {
+async function spawnDetachedWorker(record: JobRecord, dir: string): Promise<JobRecord> {
   return await withJobRecordLock(dir, record.key, async () => {
     const current = await readPersistedJobRecord(dir, record.key);
-    if (jobRecoveryStateId(current) !== jobRecoveryStateId(record)) {
-      throw new JobOperationError("job_state_changed", `Job '${record.key}' changed before worker spawn could be applied`);
+    if (current.jobIncarnation !== record.jobIncarnation || current.status !== "queued") {
+      throw new JobOperationError("job_state_changed", `Job '${record.key}' changed before worker spawn`);
     }
     const workerId = crypto.randomUUID();
-    const workerGeneration = current.workerGeneration + 1;
     current.status = "running";
     current.workerId = workerId;
-    current.workerGeneration = workerGeneration;
     current.workerPid = null;
-    current.workerHeartbeatAt = new Date().toISOString();
     current.completedAt = null;
     current.updatedAt = new Date().toISOString();
     await writeJobRecordUnlocked(dir, current);
@@ -686,7 +435,6 @@ async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "star
           ...process.env,
           ...stateEnvForChild(),
           CODEXCTL_WORKER_ID: workerId,
-          CODEXCTL_WORKER_GENERATION: String(workerGeneration),
         },
         stdin: "ignore",
         stdout: Bun.file(`${dir}/worker.log`),
@@ -702,20 +450,18 @@ async function spawnDetachedWorker(record: JobRecord, dir: string, reason: "star
       await writeJobRecordUnlocked(dir, current);
       await appendEvent(dir, {
         direction: "worker",
-        event: { type: "worker.spawn_failed", workerId, workerGeneration, reason, error: current.error },
+        event: { type: "worker.spawn_failed", workerId, error: current.error },
         at: new Date().toISOString(),
       });
       throw error;
     }
     proc.unref();
     current.workerPid = proc.pid;
-    current.workerHeartbeatAt = new Date().toISOString();
     current.updatedAt = new Date().toISOString();
     await writeJobRecordUnlocked(dir, current);
-    await writeWorkerHeartbeatUnlocked(dir, current);
     await appendEvent(dir, {
       direction: "worker",
-      event: { type: "worker.spawned", pid: proc.pid, workerId, workerGeneration, reason },
+      event: { type: "worker.spawned", pid: proc.pid, workerId },
       at: new Date().toISOString(),
     });
     return current;
@@ -731,23 +477,15 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   const envWorkerId = process.env.CODEXCTL_WORKER_ID;
   if (envWorkerId) record.workerId = envWorkerId;
   else if (!record.workerId) record.workerId = crypto.randomUUID();
-  const envGeneration = Number(process.env.CODEXCTL_WORKER_GENERATION);
-  if (Number.isInteger(envGeneration) && envGeneration > 0) record.workerGeneration = envGeneration;
-  else if (record.workerGeneration <= 0) record.workerGeneration = 1;
   record.workerPid ??= process.pid;
-  record.workerHeartbeatAt = new Date().toISOString();
   await writeWorkerJobRecord(dir, record);
-  await writeWorkerHeartbeat(dir, record);
   await appendEvent(dir, {
     direction: "worker",
-    event: { type: "worker.started", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration },
+    event: { type: "worker.started", pid: process.pid, workerId: record.workerId },
     at: new Date().toISOString(),
   });
 
   const processedControlIds = new Set<string>();
-  const heartbeatTimer = setInterval(() => {
-    void refreshWorkerHeartbeat(record, dir).catch(() => undefined);
-  }, WORKER_HEARTBEAT_INTERVAL_MS);
   const client = new AppServerClient(async (event) => {
     await appendEvent(dir, event);
     updateRecordFromEvent(record, event);
@@ -758,12 +496,6 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     await client.initialize();
     const threadResult = await client.request("thread/start", {
       cwd: record.repo,
-      runtimeWorkspaceRoots: [record.repo],
-      model: record.model,
-      approvalsReviewer: "user",
-      approvalPolicy: record.approvalPolicy,
-      sandbox: record.sandbox,
-      threadSource: "other",
     }) as { thread?: { id?: string } };
     const threadId = threadResult.thread?.id;
     if (!threadId) throw new Error("thread/start response did not include thread.id");
@@ -772,11 +504,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     const turnResult = await client.request("turn/start", {
       threadId,
       cwd: record.repo,
-      runtimeWorkspaceRoots: [record.repo],
       input: [{ type: "text", text: record.prompt }],
-      responsesapiClientMetadata: {
-        codexctl_job_key: record.key,
-      },
     }) as { turn?: { id?: string } };
     const turnId = turnResult.turn?.id;
     if (!turnId) throw new Error("turn/start response did not include turn.id");
@@ -796,7 +524,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     if (error instanceof StaleWorkerWriteError) {
       await appendEvent(dir, {
         direction: "worker",
-        event: { type: "worker.stale", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration, error: error.message },
+        event: { type: "worker.stale", error: error.message },
         at: new Date().toISOString(),
       });
       throw error;
@@ -811,7 +539,7 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
       if (writeError instanceof StaleWorkerWriteError) {
         await appendEvent(dir, {
           direction: "worker",
-          event: { type: "worker.stale", pid: process.pid, workerId: record.workerId, workerGeneration: record.workerGeneration, error: writeError.message },
+          event: { type: "worker.stale", error: writeError.message },
           at: new Date().toISOString(),
         });
       } else {
@@ -820,7 +548,6 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     }
     throw error;
   } finally {
-    clearInterval(heartbeatTimer);
     await client.close();
     await appendEvent(dir, {
       direction: "worker",
@@ -836,20 +563,13 @@ export async function readJob(key: string): Promise<JobRecord> {
 }
 
 export async function readJobEvents(key: string): Promise<unknown[]> {
-  const path = `${jobDir(key)}/events.jsonl`;
-  const file = Bun.file(path);
-  if (!(await file.exists())) return [];
-  const text = await file.text();
-  return text
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as unknown);
+  return readRawEvents(`${jobDir(key)}/events.jsonl`);
 }
 
 export async function readJobSummary(key: string, eventLimit = 10): Promise<JobSummary> {
   const job = await readJob(key);
-  const compactEvents = (await readJobEvents(key)).flatMap((event) => compactJobEvent(event));
-  const recentEvents = eventLimit <= 0 ? [] : compactEvents.slice(-eventLimit);
+  const events = await readJobEvents(key);
+  const recentEvents = eventLimit <= 0 ? [] : events.slice(-eventLimit);
   const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
   const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
   const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
@@ -860,17 +580,12 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     repo: job.repo,
     prompt: job.prompt,
-    model: job.model,
-    approvalPolicy: job.approvalPolicy,
-    sandbox: job.sandbox,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     workerId: job.workerId,
-    workerGeneration: job.workerGeneration,
     workerPid: job.workerPid,
-    workerHealth: workerHealth(job),
     threadId: job.threadId,
     turnId: job.turnId,
     cancelRequestedAt: job.cancelRequestedAt,
@@ -881,7 +596,6 @@ export async function readJobSummary(key: string, eventLimit = 10): Promise<JobS
     approvalCounts: approvalCounts(job.approvals),
     finalResponse: job.finalResponse,
     error: job.error,
-    diagnostics: summarizeCompactEvents(compactEvents, eventLimit),
     recentEvents,
   };
 }
@@ -1235,17 +949,10 @@ function modernApprovalDecision(approval: ApprovalRecord, decision: ApprovalReso
 
 function sessionApprovalDecision(params: unknown): unknown | null {
   if (!isObject(params)) return null;
-  const { availableDecisions, proposedExecpolicyAmendment } = params;
+  const { availableDecisions } = params;
   if (Array.isArray(availableDecisions)) {
     const sessionDecision = availableDecisions.find((candidate) => isObject(candidate) && "acceptWithExecpolicyAmendment" in candidate);
     if (sessionDecision) return sessionDecision;
-  }
-  if (Array.isArray(proposedExecpolicyAmendment)) {
-    return {
-      acceptWithExecpolicyAmendment: {
-        execpolicy_amendment: proposedExecpolicyAmendment,
-      },
-    };
   }
   return null;
 }
@@ -1255,14 +962,6 @@ function legacyApprovalDecision(decision: ApprovalResolveCommand["decision"]): s
   if (decision === "approveForSession") return "approved_for_session";
   if (decision === "cancel") return "abort";
   return "denied";
-}
-
-function isApprovalRequest(method: string): boolean {
-  return method === "item/commandExecution/requestApproval"
-    || method === "item/fileChange/requestApproval"
-    || method === "item/permissions/requestApproval"
-    || method === "execCommandApproval"
-    || method === "applyPatchApproval";
 }
 
 function upsertApproval(record: JobRecord, approval: ApprovalRecord): void {
@@ -1285,37 +984,6 @@ function getNestedString(value: unknown, path: string[]): string | null {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-async function appendEvent(dir: string, event: AppServerEvent): Promise<void> {
-  await appendFile(`${dir}/events.jsonl`, JSON.stringify(event) + "\n");
-}
-
-async function readNewCompleteLines(path: string, offset: number): Promise<{ lines: string[]; offset: number }> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) return { lines: [], offset };
-  const size = file.size;
-  if (offset > size) offset = 0;
-  if (offset === size) return { lines: [], offset };
-
-  const chunk = await file.slice(offset, size).text();
-  const lastNewline = chunk.lastIndexOf("\n");
-  if (lastNewline < 0) return { lines: [], offset };
-
-  const consumed = chunk.slice(0, lastNewline + 1);
-  return {
-    lines: consumed
-      .split("\n")
-      .filter((line) => line.trim().length > 0),
-    offset: offset + new TextEncoder().encode(consumed).byteLength,
-  };
-}
-
-async function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
-  await mkdir(dirname(`${dir}/job.json`), { recursive: true });
-  await withJobRecordLock(dir, record.key, async () => {
-    await writeJobRecordUnlocked(dir, record);
-  });
 }
 
 async function writeJobRecordUnlocked(dir: string, record: JobRecord): Promise<void> {
@@ -1346,9 +1014,6 @@ async function assertCurrentWorkerRecordUnlocked(dir: string, record: JobRecord)
   }
   if (latest.jobIncarnation !== null && latest.jobIncarnation !== record.jobIncarnation) {
     throw new StaleWorkerWriteError(`job incarnation ${record.jobIncarnation ?? "legacy"} is stale; current incarnation is ${latest.jobIncarnation}`);
-  }
-  if (latest.workerGeneration > 0 && record.workerGeneration > 0 && latest.workerGeneration !== record.workerGeneration) {
-    throw new StaleWorkerWriteError(`worker generation ${record.workerGeneration} is stale; current generation is ${latest.workerGeneration}`);
   }
 }
 
@@ -1432,35 +1097,10 @@ async function mergePersistedControlFields(dir: string, record: JobRecord): Prom
   }
 }
 
-async function refreshWorkerHeartbeat(record: JobRecord, dir: string): Promise<void> {
-  const now = Date.now();
-  const previous = record.workerHeartbeatAt ? Date.parse(record.workerHeartbeatAt) : 0;
-  if (Number.isFinite(previous) && now - previous < WORKER_HEARTBEAT_INTERVAL_MS) return;
-  record.workerHeartbeatAt = new Date(now).toISOString();
-  await writeWorkerHeartbeat(dir, record);
-}
-
-async function writeWorkerHeartbeat(dir: string, record: JobRecord): Promise<void> {
-  await withJobRecordLock(dir, record.key, async () => {
-    await assertCurrentWorkerRecordUnlocked(dir, record);
-    await writeWorkerHeartbeatUnlocked(dir, record);
-  });
-}
-
-async function writeWorkerHeartbeatUnlocked(dir: string, record: JobRecord): Promise<void> {
-  await Bun.write(`${dir}/worker-heartbeat.json`, JSON.stringify({
-    jobIncarnation: record.jobIncarnation,
-    workerId: record.workerId,
-    workerGeneration: record.workerGeneration,
-    workerPid: record.workerPid,
-    workerHeartbeatAt: record.workerHeartbeatAt,
-  }, null, 2) + "\n");
-}
-
 async function readPersistedJobRecord(dir: string, key: string): Promise<JobRecord> {
   const record = normalizeJobRecord(await Bun.file(`${dir}/job.json`).json(), key);
   await overlayCancelRequest(record, dir);
-  return await overlayWorkerHeartbeat(record, dir);
+  return record;
 }
 
 async function overlayCancelRequest(record: JobRecord, dir: string): Promise<void> {
@@ -1481,49 +1121,10 @@ async function overlayCancelRequest(record: JobRecord, dir: string): Promise<voi
   }
 }
 
-async function overlayWorkerHeartbeat(record: JobRecord, dir: string): Promise<JobRecord> {
-  const file = Bun.file(`${dir}/worker-heartbeat.json`);
-  if (!(await file.exists())) return record;
-  try {
-    const heartbeat = await file.json();
-    if (isObject(heartbeat) && typeof heartbeat.workerHeartbeatAt === "string") {
-      if (!heartbeatMatchesCurrentWorker(heartbeat, record)) return record;
-      record.workerHeartbeatAt = heartbeat.workerHeartbeatAt;
-    }
-  } catch {
-    return record;
-  }
-  return record;
-}
-
-function heartbeatMatchesCurrentWorker(heartbeat: Record<string, unknown>, record: JobRecord): boolean {
-  if (record.jobIncarnation !== null && heartbeat.jobIncarnation !== record.jobIncarnation) {
-    return false;
-  }
-  if (record.workerId !== null && typeof heartbeat.workerId !== "string") {
-    return false;
-  }
-  if (typeof heartbeat.workerId === "string" && record.workerId !== null && heartbeat.workerId !== record.workerId) {
-    return false;
-  }
-  if (record.workerGeneration > 0 && typeof heartbeat.workerGeneration !== "number") {
-    return false;
-  }
-  if (
-    typeof heartbeat.workerGeneration === "number"
-    && record.workerGeneration > 0
-    && heartbeat.workerGeneration !== record.workerGeneration
-  ) {
-    return false;
-  }
-  return true;
-}
-
 function summarizeJob(job: JobRecord): JobListItem {
   const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
   const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
   const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
-  const health = workerHealth(job);
   return {
     key: job.key,
     jobIncarnation: job.jobIncarnation,
@@ -1531,11 +1132,8 @@ function summarizeJob(job: JobRecord): JobListItem {
     nextAction: nextAction(job.status, actionableApprovals, job.cancelRequestedAt),
     updatedAt: job.updatedAt,
     workerId: job.workerId,
-    workerGeneration: job.workerGeneration,
     workerPid: job.workerPid,
-    workerHeartbeatAt: job.workerHeartbeatAt,
-    workerAlive: health.alive,
-    workerHealth: health,
+    workerAlive: isProcessAlive(job.workerPid),
     threadId: job.threadId,
     turnId: job.turnId,
     pendingApprovals: pendingApprovals.length,
@@ -1545,58 +1143,8 @@ function summarizeJob(job: JobRecord): JobListItem {
   };
 }
 
-function classifyJobReconciliation(job: JobListItem): JobReconcileItem | null {
-  if (job.status === "unreadable") {
-    return reconcileItem(job, "skip_unreadable", job.error ?? "job record is unreadable", false);
-  }
-  if (isTerminalStatus(job.status)) {
-    return null;
-  }
-  if (job.status === "queued") {
-    return reconcileItem(job, "restart_queued", "queued job has no worker", true);
-  }
-  if (job.workerHealth?.alive) {
-    return reconcileItem(job, "skip_worker_alive", `worker ${job.workerPid} is alive`, false);
-  }
-  if (!job.threadId && !job.turnId) {
-    return reconcileItem(job, "restart_before_thread", "worker died before starting a thread", true);
-  }
-  return reconcileItem(job, "fail_in_flight_dead_worker", "in-flight app-server stdio session cannot be resumed", true);
-}
-
-function reconcileItem(
-  job: JobListItem,
-  decision: JobReconcileDecision,
-  reason: string,
-  mutates: boolean,
-): JobReconcileItem {
-  return {
-    key: job.key,
-    jobIncarnation: job.jobIncarnation,
-    status: job.status,
-    decision,
-    reason,
-    mutates,
-    applied: false,
-    recoveryStateId: job.status === "unreadable" ? null : jobRecoveryStateId(job),
-    workerId: job.workerId,
-    workerGeneration: job.workerGeneration,
-    workerPid: job.workerPid,
-    workerHealth: job.workerHealth,
-    threadId: job.threadId,
-    turnId: job.turnId,
-    result: null,
-    error: job.status === "unreadable" ? job.error : null,
-  };
-}
-
 function isTerminalStatus(status: JobStatus | "unreadable"): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
-}
-
-function matchesPruneStatus(status: JobStatus | "unreadable", filter: JobPruneStatus): boolean {
-  if (filter === "terminal") return isTerminalStatus(status);
-  return status === filter;
 }
 
 function approvalCounts(approvals: ApprovalRecord[]): Record<ApprovalStatus, number> {
@@ -1664,55 +1212,6 @@ function jobWaitResult(
   };
 }
 
-function summarizeCompactEvents(events: CompactJobEvent[], eventLimit: number): JobSummaryDiagnostics {
-  const diagnostics: JobSummaryDiagnostics = {
-    compactEventCount: events.length,
-    recentEventsLimit: eventLimit,
-    recentEventsTruncated: eventLimit <= 0 ? events.length > 0 : events.length > eventLimit,
-    warningCount: 0,
-    mcpFailureCount: 0,
-    appServerErrorCount: 0,
-    commandCounts: {
-      started: 0,
-      completed: 0,
-      failed: 0,
-    },
-    lastWarning: null,
-    lastError: null,
-    lastFailedCommand: null,
-  };
-
-  for (const event of events) {
-    if (event.type === "warning") {
-      diagnostics.warningCount++;
-      diagnostics.lastWarning = event;
-      continue;
-    }
-    if (event.type === "mcp.failed") {
-      diagnostics.mcpFailureCount++;
-      continue;
-    }
-    if (event.type === "app_server.error") {
-      diagnostics.appServerErrorCount++;
-      diagnostics.lastError = event;
-      continue;
-    }
-    if (event.type === "command.started") {
-      diagnostics.commandCounts.started++;
-      continue;
-    }
-    if (event.type === "command.completed") {
-      diagnostics.commandCounts.completed++;
-      if (event.status === "failed" || (event.exitCode !== null && event.exitCode !== 0)) {
-        diagnostics.commandCounts.failed++;
-        diagnostics.lastFailedCommand = event;
-      }
-    }
-  }
-
-  return diagnostics;
-}
-
 function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
   if (!isObject(value)) throw new Error("job.json did not contain an object");
   const now = new Date().toISOString();
@@ -1724,20 +1223,13 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     jobIncarnation: typeof value.jobIncarnation === "string" ? value.jobIncarnation : null,
     repo: typeof value.repo === "string" ? value.repo : process.cwd(),
     prompt: typeof value.prompt === "string" ? value.prompt : "",
-    model: typeof value.model === "string" ? value.model : null,
-    approvalPolicy: isApprovalPolicy(value.approvalPolicy) ? value.approvalPolicy : "on-request",
-    sandbox: isSandbox(value.sandbox) ? value.sandbox : null,
     status,
     createdAt: typeof value.createdAt === "string" ? value.createdAt : now,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : now,
     startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
     completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
     workerId: typeof value.workerId === "string" ? value.workerId : null,
-    workerGeneration: typeof value.workerGeneration === "number" && Number.isInteger(value.workerGeneration) && value.workerGeneration >= 0
-      ? value.workerGeneration
-      : 0,
     workerPid: typeof value.workerPid === "number" ? value.workerPid : null,
-    workerHeartbeatAt: typeof value.workerHeartbeatAt === "string" ? value.workerHeartbeatAt : null,
     threadId: typeof value.threadId === "string" ? value.threadId : null,
     turnId: typeof value.turnId === "string" ? value.turnId : null,
     cancelRequestedAt: typeof value.cancelRequestedAt === "string" ? value.cancelRequestedAt : null,
@@ -1746,14 +1238,6 @@ function normalizeJobRecord(value: unknown, fallbackKey: string): JobRecord {
     finalResponse: typeof value.finalResponse === "string" ? value.finalResponse : "",
     error: typeof value.error === "string" ? value.error : null,
   };
-}
-
-function isApprovalPolicy(value: unknown): value is JobRecord["approvalPolicy"] {
-  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
-}
-
-function isSandbox(value: unknown): value is NonNullable<JobRecord["sandbox"]> {
-  return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
 }
 
 async function readJobRootEntries(root: string) {
@@ -1777,58 +1261,6 @@ function isProcessAlive(pid: number | null): boolean {
   } catch {
     return false;
   }
-}
-
-export function workerHealth(job: JobRecord): WorkerHealth {
-  if (isTerminalStatus(job.status)) {
-    return {
-      pid: job.workerPid,
-      alive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
-      heartbeatAt: job.workerHeartbeatAt,
-      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
-      stale: false,
-      reason: "terminal",
-    };
-  }
-  if (job.status === "queued") {
-    return {
-      pid: job.workerPid,
-      alive: job.workerPid === null ? false : isProcessAlive(job.workerPid),
-      heartbeatAt: job.workerHeartbeatAt,
-      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
-      stale: false,
-      reason: "queued",
-    };
-  }
-  if (job.workerPid === null) {
-    return {
-      pid: null,
-      alive: false,
-      heartbeatAt: job.workerHeartbeatAt,
-      heartbeatAgeMs: heartbeatAgeMs(job.workerHeartbeatAt),
-      stale: true,
-      reason: "no_worker_pid",
-    };
-  }
-
-  const alive = isProcessAlive(job.workerPid);
-  const age = heartbeatAgeMs(job.workerHeartbeatAt);
-  const stale = !alive || age === null || age > WORKER_HEARTBEAT_STALE_MS;
-  return {
-    pid: job.workerPid,
-    alive,
-    heartbeatAt: job.workerHeartbeatAt,
-    heartbeatAgeMs: age,
-    stale,
-    reason: alive ? (stale ? "alive_stale" : "alive_recent") : "dead",
-  };
-}
-
-function heartbeatAgeMs(heartbeatAt: string | null): number | null {
-  if (!heartbeatAt) return null;
-  const timestamp = Date.parse(heartbeatAt);
-  if (!Number.isFinite(timestamp)) return null;
-  return Math.max(0, Date.now() - timestamp);
 }
 
 function isErrorWithCode(value: unknown): value is { code: string } {
