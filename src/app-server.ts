@@ -194,22 +194,6 @@ export class AppServerClient {
   }
 }
 
-export async function readDaemonVersion(): Promise<JsonObject> {
-  const proc = Bun.spawn(["codex", "app-server", "daemon", "version"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (exitCode !== 0) {
-    throw new Error(stderr || `codex app-server daemon version exited with ${exitCode}`);
-  }
-  return JSON.parse(stdout) as JsonObject;
-}
-
 export function assertJobKey(key: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key) || key.includes("..")) {
     throw new Error("Job key must be 1-128 chars of letters, numbers, dot, underscore, or dash; it cannot contain '..'");
