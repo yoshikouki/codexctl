@@ -30,6 +30,8 @@ codexctl job wait demo --timeout-ms 600000
 
 Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the same `threadId`. Jobs without a `threadId` cannot resume; instead, use a new key to create a job.
 
+`job summary` includes saved `progress`: `current` (`type`, `startedAt`, and a command limited to 200 characters for command execution), `lastCommentary` (latest completed commentary, limited to 500 characters), `commands: { run, failed }`, and `totalTokens`. Counts span all turns in the job; unavailable values are null and counts start at zero. `current` clears on matching item completion or turn completion. Progress is pull-only; summary reads `job.json` and only the requested event tail.
+
 ## Parallel work with worktrees
 
 For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and pass that path to `--repo`. The caller creates worktrees with Git.
@@ -66,7 +68,7 @@ The payload excludes the prompt, params from approvals, error, and environment v
 
 Requests time out after 10 seconds, with no retries or redirect following. HTTP 200 records `notify.sent`; failures record `notify.failed`. Notification failures do not change the job's state. If recording the event itself fails, the record is omitted. Cancellation before startup also sends a notification when processed by the worker, but a worker startup failure does not send an automatic notification.
 
-`job summary` returns the latest notification result in `lastNotification` as `{ status: "sent" | "failed" | "skipped", at }`, including `notify.skipped` when the URL is missing. It is null if no result is recorded and is included even with `--events 0`.
+`job summary` reads the latest worker notification result from `job.json` in `lastNotification` as `{ status: "sent" | "failed" | "skipped", at }`, including `notify.skipped` when the URL is missing. It is null if no result is recorded and is included even with `--events 0`. Manual `job notify` results remain in the event log and do not update this saved value.
 
 ## Agent skill
 

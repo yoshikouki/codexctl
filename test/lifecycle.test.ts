@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { createJob, readJob, readJobEvents, runJobWorker } from "../src/job.ts";
+import { createJob, enqueueSteer, readJob, readJobEvents, readJobSummary, runJobWorker } from "../src/job.ts";
 import { jobDir } from "../src/state.ts";
 
 const cliPath = join(import.meta.dir, "../src/cli.ts");
@@ -33,6 +33,7 @@ let finished = false;
 function finish(status = "completed") {
   if (finished) return;
   finished = true;
+  send({method:"item/completed",params:{item:{id:"finish-command",type:"commandExecution",status:"completed",exitCode:0}}});
   send({method:"item/completed",params:{item:{type:"agentMessage",phase:"final_answer",text:"OK"}}});
   send({method:"turn/completed",params:{turn:{id:turnId,status}}});
 }
@@ -43,13 +44,20 @@ for await (const line of console) {
   if (m.method === "turn/start") {
     turnId = crypto.randomUUID();
     send({id:m.id,result:{turn:{id:turnId}}});
-    send({method:"item/started",params:{item:{type:"agentMessage",phase:"commentary"}}});
+    send({method:"item/started",params:{item:{id:"commentary",type:"agentMessage",phase:"commentary"}}});
     send({method:"item/agentMessage/delta",params:{delta:"😀".repeat(2100)}});
     const timer = setInterval(async () => {
       if (await Bun.file(process.env.TEST_RELEASE).exists()) { clearInterval(timer); finish(process.env.TEST_STATUS); }
     }, 20);
   }
-  if (m.method === "turn/steer") send({id:m.id,result:{}});
+  if (m.method === "turn/steer") {
+    const text = m.params.input[0].text;
+    if (text.startsWith("test-events:")) {
+      const batch = JSON.parse(text.slice("test-events:".length));
+      for (const event of batch.events) send(event);
+      send({id:m.id,result:{batch:batch.id}});
+    } else send({id:m.id,result:{}});
+  }
   if (m.method === "turn/interrupt") { send({id:m.id,result:{}}); finish("interrupted"); }
 }
 `);
@@ -102,7 +110,7 @@ test("run detaches; global state, JSON summary, notify and live steer work acros
   expect(Array.from(summary.value.latestAgentMessage)).toHaveLength(2000);
   expect(summary.value.finalResponse).toBe("");
   expect(summary.value.recentEvents).toHaveLength(5);
-  expect(Object.keys(summary.value).sort()).toEqual(["key", "status", "repo", "threadId", "turnId", "createdAt", "startedAt", "completedAt", "pendingApprovals", "latestAgentMessage", "finalResponse", "error", "lastNotification", "recentEvents"].sort());
+  expect(Object.keys(summary.value).sort()).toEqual(["key", "status", "repo", "threadId", "turnId", "createdAt", "startedAt", "completedAt", "pendingApprovals", "latestAgentMessage", "finalResponse", "error", "progress", "lastNotification", "recentEvents"].sort());
   expect((await cli(["job", "notify", "demo"])).code).toBe(0);
   expect((await cli(["job", "steer", "demo", "--prompt", "adjust"])).code).toBe(0);
   await until(async () => (await readJobEvents("demo") as any[]).some(e => e.message?.method === "turn/steer"));
@@ -131,6 +139,7 @@ for (const [serverStatus, status] of [["completed", "completed"], ["failed", "fa
     expect(resumed.value.summary.turnId).not.toBe(previous.turnId);
     expect(resumed.value.summary.threadId).toBe(previous.threadId);
     await exited(2);
+    expect((await readJobSummary("demo", 0)).progress.commands).toEqual({ run: 2, failed: 0 });
     const requests = (await readJobEvents("demo") as any[]).filter(e => e.direction === "client" && e.message?.method).map(e => e.message);
     expect(requests.filter(m => m.method === "thread/start")).toHaveLength(1);
     expect(requests.filter(m => m.method === "thread/resume").map(m => m.params)).toEqual([{ threadId: "same-thread", cwd: join(tmp, "a") }]);
@@ -151,6 +160,66 @@ test("CLI control commands leave job.json byte-for-byte unchanged", async () => 
     expect(await Bun.file(join(jobDir("demo"), "job.json")).text()).toBe(before);
   }
   expect((await Bun.file(join(jobDir("demo"), "control.jsonl")).text()).trim().split("\n")).toHaveLength(3);
+});
+
+test("running summary persists item progress, completed commentary, command counts and latest tokens", async () => {
+  await start();
+  const events = await readJobEvents("demo") as any[];
+  const started = events.find(e => e.message?.method === "item/started");
+  expect((await readJobSummary("demo", 0)).progress).toEqual({
+    current: { type: "agentMessage", startedAt: started.at },
+    lastCommentary: null,
+    commands: { run: 0, failed: 0 },
+    totalTokens: null,
+  });
+  const emit = async (events: unknown[]) => {
+    const id = crypto.randomUUID();
+    await enqueueSteer("demo", `test-events:${JSON.stringify({ id, events })}`);
+    // The response follows all events in the batch, so their records are persisted.
+    await until(async () => (await readJobEvents("demo") as any[]).some(e => e.direction === "server" && e.message?.result?.batch === id));
+    return (await readJobSummary("demo", 0)).progress;
+  };
+  const item = (method: string, item: object) => ({ method, params: { item } });
+  const command = `echo ${"😀".repeat(201)}`;
+  let progress = await emit([
+    item("item/started", { id: "current", type: "commandExecution", command }),
+    item("item/completed", { id: "other", type: "commandExecution", status: "completed", exitCode: 0 }),
+    item("item/completed", { id: "commentary", type: "agentMessage", phase: "commentary", text: "Checking the commands." }),
+    item("item/completed", { id: "answer", type: "agentMessage", phase: "final_answer", text: "Final answer." }),
+  ]);
+  const commandStarted = (await readJobEvents("demo") as any[]).find(e => e.message?.method === "item/started" && e.message.params.item.id === "current");
+  expect(progress.current).toEqual({ type: "commandExecution", startedAt: commandStarted.at, command: Array.from(command).slice(0, 200).join("") });
+  expect(progress.commands).toEqual({ run: 1, failed: 0 });
+  expect(progress.lastCommentary).toBe("Checking the commands.");
+
+  progress = await emit([
+    item("item/completed", { id: "current", type: "commandExecution", status: "completed", exitCode: 7 }),
+    item("item/completed", { id: "denied", type: "commandExecution", status: "declined", exitCode: 0 }),
+    item("item/completed", { id: "no-exit", type: "commandExecution", status: "completed", exitCode: null }),
+    item("item/completed", { id: "note", type: "agentMessage", phase: "commentary", text: "😀".repeat(501) }),
+    item("item/completed", { id: "answer-2", type: "agentMessage", phase: "final_answer", text: "Another answer." }),
+    { method: "thread/tokenUsage/updated", params: { tokenUsage: { total: { totalTokens: 123 } } } },
+    { method: "thread/tokenUsage/updated", params: { tokenUsage: { total: { totalTokens: 456 }, last: { totalTokens: 10 } } } },
+  ]);
+  expect(progress).toEqual({ current: null, commands: { run: 4, failed: 2 }, lastCommentary: "😀".repeat(500), totalTokens: 456 });
+  const reasoning = await emit([item("item/started", { id: "thinking", type: "reasoning" })]);
+  expect(reasoning.current).toEqual({ type: "reasoning", startedAt: expect.any(String) });
+  expect((await emit([item("item/completed", { id: "thinking", type: "reasoning" })])).current).toBeNull();
+  expect((await emit([item("item/started", { id: "unfinished", type: "fileChange" })])).current?.type).toBe("fileChange");
+  await Bun.write(process.env.TEST_RELEASE!, "");
+  await exited();
+  expect((await readJobSummary("demo", 0)).progress).toEqual({ ...progress, commands: { run: 5, failed: 2 }, current: null });
+}, 10000);
+
+test("missing progress defaults to nulls and zero counts without rewriting job.json", async () => {
+  await createJob({ key: "demo", repo: join(tmp, "a"), prompt: "fixture" });
+  const path = join(jobDir("demo"), "job.json");
+  const record = await Bun.file(path).json();
+  delete record.progress;
+  const before = JSON.stringify(record);
+  await Bun.write(path, before);
+  expect((await readJobSummary("demo", 0)).progress).toEqual({ current: null, lastCommentary: null, commands: { run: 0, failed: 0 }, totalTokens: null });
+  expect(await Bun.file(path).text()).toBe(before);
 });
 
 test("queued cancel is written only by worker and starts no app-server", async () => {

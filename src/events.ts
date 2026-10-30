@@ -19,6 +19,26 @@ export async function readRawEvents(path: string): Promise<unknown[]> {
     .map((line) => JSON.parse(line) as unknown);
 }
 
+export async function readTailEvents(path: string, limit: number): Promise<unknown[]> {
+  if (limit <= 0) return [];
+  const file = Bun.file(path);
+  if (!(await file.exists())) return [];
+  let offset = file.size;
+  let tail = Buffer.alloc(0);
+  while (offset > 0) {
+    const start = Math.max(0, offset - 64 * 1024);
+    tail = Buffer.concat([Buffer.from(await file.slice(start, offset).arrayBuffer()), tail]);
+    offset = start;
+    const lines = tail.toString("utf8").split("\n");
+    if (offset > 0) lines.shift(); // The first line may start before this chunk.
+    const records = lines.filter(line => line.trim().length > 0);
+    if (records.length >= limit || offset === 0) {
+      return records.slice(-limit).map(line => JSON.parse(line) as unknown);
+    }
+  }
+  return [];
+}
+
 export async function appendEvent(dir: string, event: AppServerEvent): Promise<void> {
   await appendFile(`${dir}/events.jsonl`, JSON.stringify(event) + "\n");
 }

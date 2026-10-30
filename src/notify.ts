@@ -11,15 +11,20 @@ export async function sendJobNotification(
   job: JobRecord,
   event: NotifyEvent,
   approvalId?: string,
+  onRecorded?: (notification: NonNullable<JobRecord["lastNotification"]>) => Promise<void>,
 ): Promise<NotifyResult> {
+  const recordNotification = async (status: NonNullable<JobRecord["lastNotification"]>["status"], details = {}) => {
+    const at = new Date().toISOString();
+    // Notification/audit I/O must never turn a successful job into a failed job.
+    try {
+      await appendEvent(dir, { direction: "worker", event: { type: `notify.${status}`, ...details }, at });
+      await onRecorded?.({ status, at });
+    } catch {}
+  };
   const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
   if (!url) {
     if (event !== "job.status") {
-      await appendEvent(dir, {
-        direction: "worker",
-        event: { type: "notify.skipped", reason: "not_configured" },
-        at: new Date().toISOString(),
-      }).catch(() => undefined);
+      await recordNotification("skipped", { reason: "not_configured" });
     }
     return { ok: false, error: { code: "notify_not_configured", message: "CODEXCTL_GROK_BOT_NOTIFY_URL is not configured" } };
   }
@@ -56,12 +61,7 @@ export async function sendJobNotification(
   } catch (error) {
     failure = { errorType: error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request_error" };
   }
-  // Notification/audit I/O must never turn a successful job into a failed job.
-  await appendEvent(dir, {
-    direction: "worker",
-    event: { type: failure ? "notify.failed" : "notify.sent", ...failure },
-    at: new Date().toISOString(),
-  }).catch(() => undefined);
+  await recordNotification(failure ? "failed" : "sent", failure);
   return failure
     ? { ok: false, error: { code: "notify_failed", message: "httpStatus" in failure ? `HTTP ${failure.httpStatus}` : failure.errorType } }
     : { ok: true };
