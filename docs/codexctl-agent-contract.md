@@ -11,12 +11,12 @@ codexctl は、インストール済み Codex の app-server を操作する薄�
 | コマンド | フラグ | JSON 出力の要点 |
 | --- | --- | --- |
 | `codexctl job run` | 必須: `--key <key> --prompt <prompt>`。任意: `--repo <path> --force` | 初期の JobRecord。`status: "queued"`、`key`、`repo`、`prompt`、時刻、thread/turn ID、承認など。待機しない |
-| `codexctl job list` | なし | ジョブ一覧。`key`、`status`、`nextAction`、`workerAlive`、承認件数、thread/turn ID、`error` など。更新日時の降順 |
+| `codexctl job list` | なし | ジョブ一覧。`key`、`status`、`workerAlive`、承認件数、thread/turn ID、`error` など。更新日時の降順 |
 | `codexctl job summary <key>` | `--events <n>` | 下記の Summary |
 | `codexctl job wait <key>` | `--events <n> --interval-ms <ms> --timeout-ms <ms>` | 下記の Wait |
 | `codexctl job events <key>` | `--format raw` | 保存済みイベントを1行1件で出力して終了 |
-| `codexctl job steer <key>` | 必須: `--prompt <prompt>`。任意: `--wait` と待機用フラグ | `id`、`type: "turn.steer"`、`at`、`input`。終了済みなら `resume: true`。待機時は `{ command, wait }` |
-| `codexctl job cancel <key>` | `--wait` と待機用フラグ | `{ action, reason, job, command }`。`action` は `interrupt_queued` または `none`。待機時は `{ cancel, wait }` |
+| `codexctl job steer <key>` | 必須: `--prompt <prompt>` | `id`、`type: "turn.steer"`、`at`、`input`。終了済みなら `resume: true` |
+| `codexctl job cancel <key>` | なし | `{ action, reason, job, command }`。`action` は `interrupt_queued` または `none` |
 | `codexctl job rm <key>` | `--force --dry-run` | `{ action, key, status, reason }`。`action` は `removed` または `would_remove` |
 | `codexctl job notify <key>` | なし | 送信成功時は `{ ok: true }`。未設定は `notify_not_configured`、送信失敗は `notify_failed` のエラー |
 | `codexctl approval list <key>` | `--all` | 承認レコードの配列。既定は pending のみ。`--all` で解決済みも含む |
@@ -24,7 +24,7 @@ codexctl は、インストール済み Codex の app-server を操作する薄�
 | `codexctl approval approve <key> <id>` | `--for-session --wait` と待機用フラグ | `{ id, type: "approval.resolve", at, approvalId, decision }`。待機時は `{ command, wait }` |
 | `codexctl approval reject <key> <id>` | `--cancel --wait` と待機用フラグ | approve と同じ形。`decision` は `reject`、`--cancel` 指定時は `cancel` |
 
-待機用フラグは `--events <n>`、`--interval-ms <ms>`、`--timeout-ms <ms>` です。`--wait` と組み合わせて使います。`--events` は0以上の整数で既定値5、間隔は正の整数で既定値1,000 ms、タイムアウトは正の整数で省略時は無期限です。
+待機用フラグは `--events <n>`、`--interval-ms <ms>`、`--timeout-ms <ms>` です。`job wait`、または承認判断の `--wait` で使います。`--events` は0以上の整数で既定値5、間隔は正の整数で既定値1,000 ms、タイムアウトは正の整数で省略時は無期限です。
 
 ### Summary
 
@@ -56,13 +56,17 @@ codexctl は、インストール済み Codex の app-server を操作する薄�
 
 completed・failed・cancelled への `steer` は新しい worker を起動し、同じ `threadId` を再開して新しい turn を開始します。`threadId` がなければエラーになるので、新しい key でジョブを作成してください。
 
-新しい worker は前の worker の終了（通知送信を含む）を待ちます。turn ごとの回答・エラー・承認を初期化し、処理済みの制御コマンドは再実行しません。`steer --wait` と再開受付後の `job wait` は、以前の終了結果を返さず再開後の結果を待ちます。
+新しい worker は前の worker の終了（通知送信を含む）を待ちます。turn ごとの回答・エラー・承認を初期化し、処理済みの制御コマンドは再実行しません。再開受付後の `job wait` は、以前の終了結果を返さず再開後の結果を待ちます。
+
+steer・cancel の後は `job wait` を呼んで結果を確認します。
 
 ## 承認
 
 承認判断は running かつ pending の承認に送ります。自動承認はしません。`method` と `params` を確認してから判断してください。
 
 コマンド・ファイル承認の approve は `accept`、reject は `decline`、cancel は `cancel` を返します。`--for-session` は `params.availableDecisions` にある `acceptWithExecpolicyAmendment` をそのまま使い、なければ `acceptForSession` を返します。
+
+`execCommandApproval`・`applyPatchApproval` も現行スキーマに含まれます。approve は `approved`、`--for-session` は `approved_for_session`、reject は `{ denied: { rejection: "Rejected via codexctl" } }`、cancel は `abort` を返します。
 
 `item/permissions/requestApproval` では、要求された permissions をそのまま返し、通常は turn、`--for-session` では session の範囲で許可します。この承認への reject/cancel はエラーになります。
 

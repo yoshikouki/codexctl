@@ -21,8 +21,10 @@ codexctl approval list review
 
 ```sh
 codexctl job summary review --events 5
-codexctl job steer review --prompt "最も重要な問題に絞って報告してください。" --wait --timeout-ms 600000
-codexctl job cancel review --wait --timeout-ms 600000
+codexctl job steer review --prompt "最も重要な問題に絞って報告してください。"
+codexctl job wait review --timeout-ms 600000
+codexctl job cancel review
+codexctl job wait review --timeout-ms 600000
 codexctl job rm review --dry-run
 ```
 

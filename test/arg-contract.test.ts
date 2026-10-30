@@ -3,22 +3,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
-import { isApprovalRequest } from "../src/events.ts";
+import { readNewCompleteLines, isApprovalRequest } from "../src/events.ts";
 import { codexctlHome, jobsRoot } from "../src/state.ts";
 import {
   approvalResponseFor,
   cancelJob,
-  cancelJobAndWait,
   createJob,
   enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
-  enqueueSteerAndWait,
   listJobs,
   readApprovals,
   readJobEvents,
   readJobSummary,
-  readNewEventLines,
   removeJob,
   waitForJob,
 } from "../src/job.ts";
@@ -422,7 +419,7 @@ describe("approval protocol", () => {
         supported: true, response: { decision: "approved" },
       });
       expect(approvalResponseFor({ ...approval, method }, "reject")).toEqual({
-        supported: true, response: { decision: "denied" },
+        supported: true, response: { decision: { denied: { rejection: "Rejected via codexctl" } } },
       });
     }
   });
@@ -640,7 +637,7 @@ describe("event store", () => {
     }
   });
 
-  test("readNewEventLines consumes only complete lines using byte offsets", async () => {
+  test("readNewCompleteLines consumes only complete lines using byte offsets", async () => {
     const cwd = process.cwd();
     const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
     try {
@@ -650,12 +647,12 @@ describe("event store", () => {
       const first = JSON.stringify({ message: "日本語" }) + "\n";
       const second = JSON.stringify({ message: "next" }) + "\n";
       await Bun.write(path, first + second.slice(0, -1));
-      const firstRead = await readNewEventLines("tail-test", 0);
+      const firstRead = await readNewCompleteLines(path, 0);
       expect(firstRead.lines).toEqual([first.trimEnd()]);
       expect(firstRead.offset).toBe(new TextEncoder().encode(first).byteLength);
 
       await Bun.write(path, first + second);
-      const secondRead = await readNewEventLines("tail-test", firstRead.offset);
+      const secondRead = await readNewCompleteLines(path, firstRead.offset);
       expect(secondRead.lines).toEqual([second.trimEnd()]);
       expect(secondRead.offset).toBe(new TextEncoder().encode(first + second).byteLength);
     } finally {
@@ -781,30 +778,12 @@ describe("job control files", () => {
       expect(command.type).toBe("turn.steer");
       expect(await Bun.file(".codexctl/jobs/steer-test/control.jsonl").text()).toContain("adjust");
 
-      const waited = await enqueueSteerAndWait("steer-test", "wait-adjust", {
-        eventLimit: 0,
-        intervalMs: 1,
-        timeoutMs: 1,
-      });
-      expect(waited.command.type).toBe("turn.steer");
-      expect(waited.wait).toMatchObject({
-        ready: false,
-        reason: "timeout",
-
-      });
-
-      const cli = await runCli(["job", "steer", "steer-test", "--prompt", "cli-adjust", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
+      const cli = await runCli(["job", "steer", "steer-test", "--prompt", "cli-adjust"], tmp);
       expect(cli.exitCode).toBe(0);
-      expect(JSON.parse(cli.stdout)).toMatchObject({
-        command: {
-          type: "turn.steer",
-        },
-        wait: {
-          ready: false,
-          reason: "timeout",
-
-        },
-      });
+      expect(JSON.parse(cli.stdout).type).toBe("turn.steer");
+      const wait = await runCli(["job", "wait", "steer-test", "--timeout-ms", "1"], tmp);
+      expect(wait.exitCode).toBe(0);
+      expect(JSON.parse(wait.stdout).reason).toBe("timeout");
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -819,7 +798,6 @@ describe("job control files", () => {
     try {
       process.chdir(tmp);
       await createJob({ key: "completed-job", repo: ".", prompt: "hello" });
-      await createJob({ key: "legacy-job", repo: ".", prompt: "hello" });
       await createJob({ key: "stale-job", repo: ".", prompt: "hello" });
 
       const completedPath = ".codexctl/jobs/completed-job/job.json";
@@ -839,12 +817,6 @@ describe("job control files", () => {
       });
       await Bun.write(completedPath, JSON.stringify(completed));
 
-      const legacyPath = ".codexctl/jobs/legacy-job/job.json";
-      const legacy = await Bun.file(legacyPath).json();
-      legacy.status = "completed";
-      delete legacy.approvals;
-      await Bun.write(legacyPath, JSON.stringify(legacy));
-
       const stalePath = ".codexctl/jobs/stale-job/job.json";
       const stale = await Bun.file(stalePath).json();
       stale.status = "running";
@@ -854,11 +826,9 @@ describe("job control files", () => {
       await Bun.write(stalePath, JSON.stringify(stale));
 
       const jobs = await listJobs();
-      expect(jobs.map((job) => job.key).sort()).toEqual(["completed-job", "legacy-job", "stale-job"]);
+      expect(jobs.map((job) => job.key).sort()).toEqual(["completed-job", "stale-job"]);
       expect(jobs.find((job) => job.key === "completed-job")?.pendingApprovals).toBe(1);
       expect(jobs.find((job) => job.key === "completed-job")?.actionableApprovals).toBe(0);
-      expect(jobs.find((job) => job.key === "completed-job")?.nextAction).toBe("read_result");
-      expect(jobs.find((job) => job.key === "legacy-job")?.pendingApprovals).toBe(0);
       expect(jobs.find((job) => job.key === "stale-job")?.workerAlive).toBe(false);
 
     } finally {

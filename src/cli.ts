@@ -1,11 +1,9 @@
 #!/usr/bin/env bun
 import {
   cancelJob,
-  cancelJobAndWait,
   enqueueApprovalDecisionAndWait,
   enqueueApprovalDecision,
   enqueueSteer,
-  enqueueSteerAndWait,
   listJobs,
   notifyJob,
   readApproval,
@@ -50,7 +48,7 @@ const knownPublicFlags = [
   "wait",
 ];
 
-export async function main(argv: string[]): Promise<void> {
+async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const [resource, action, key, extra] = args.positionals;
 
@@ -112,23 +110,14 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "job" && action === "steer" && key) {
-    allowFlags(args, ["prompt", "wait", "events", "interval-ms", "timeout-ms"]);
-    const prompt = requiredString(args, "prompt");
-    if (booleanFlag(args, "wait")) {
-      await printJson(await enqueueSteerAndWait(key, prompt, waitOptionsFromFlags(args)));
-    } else {
-      await printJson(await enqueueSteer(key, prompt));
-    }
+    allowFlags(args, ["prompt"]);
+    await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
     return;
   }
 
   if (resource === "job" && action === "cancel" && key) {
-    allowFlags(args, ["wait", "events", "interval-ms", "timeout-ms"]);
-    if (booleanFlag(args, "wait")) {
-      await printJson(await cancelJobAndWait(key, waitOptionsFromFlags(args)));
-    } else {
-      await printJson(await cancelJob(key));
-    }
+    allowFlags(args, []);
+    await printJson(await cancelJob(key));
     return;
   }
 
@@ -313,8 +302,8 @@ function usageText(): string {
   codexctl job summary <key> [--events <n>]
   codexctl job wait <key> [--events <n>] [--interval-ms <ms>] [--timeout-ms <ms>]
   codexctl job events <key> [--format raw]
-  codexctl job steer <key> --prompt <prompt> [--wait]
-  codexctl job cancel <key> [--wait]
+  codexctl job steer <key> --prompt <prompt>
+  codexctl job cancel <key>
   codexctl job rm <key> [--force] [--dry-run]
   codexctl approval list <job-key> [--all]
   codexctl approval show <job-key> <approval-id>

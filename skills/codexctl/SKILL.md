@@ -18,7 +18,7 @@ codexctl job run --repo . --key review --prompt "このリポジトリをレビ�
 codexctl job wait review --timeout-ms 600000
 ```
 
-`job run` は queued レコードを返します。待機結果は `job wait` から読みます。
+`job run` は queued レコードを返します。steer・cancel の受付後も、待機結果は `job wait` から読みます。
 
 - `reason: "terminal"`: `summary.status` と `summary.finalResponse` または `summary.error` を確認して報告する。
 - `reason: "approval_required"`: `approval list` で内容を確認し、ユーザーの指示や承認方針に従って判断する。無条件に承認しない。
