@@ -2,15 +2,17 @@
 
 Agent-oriented CLI for controlling Codex app-server jobs.
 
+Current state, output and resume behavior: [step 2b contract](docs/thin-layer-step2b.md).
+
 ## Grok Bot notifications
 
 Set `CODEXCTL_GROK_BOT_NOTIFY_URL` and `CODEXCTL_GROK_BOT_NOTIFY_KEY` in the environment before starting `job run`. The detached worker sends one JSON POST when it finishes (`job.completed`, `job.failed`, or `job.cancelled`) and one per approval ID (`approval.requested`). Without a URL, automatic notification is disabled. A configured URL without a key records `notify.failed` with `missing_key` and sends nothing.
 
 ```sh
-codexctl job notify demo --json
+codexctl job notify demo
 ```
 
-This sends the current job as `job.status` once, including while an approval is pending, and returns `{ "ok": true }` on success. Failure returns a structured JSON error on stderr with a nonzero exit code; an unset URL returns `notify_not_configured`. Only automatic notifications originate from the detached worker; cancellation before a worker starts and failure to spawn a worker do not send automatically.
+This sends the current job as `job.status` once, including while an approval is pending, and returns `{ "ok": true }` on success. Failure returns a structured JSON error on stderr with a nonzero exit code; an unset URL returns `notify_not_configured`. Only automatic notifications originate from the detached worker; a queued cancellation sends when the worker processes it; failure to spawn a worker does not send automatically.
 
 Requests use `Content-Type: application/json` and `Authorization: Bearer <key>`. The body contains `source: "codexctl"`, `event`, `key`, `status`, `repo`, nullable `threadId` and `turnId`, an ISO `at` timestamp, and `finalResponse` truncated to 2,000 Unicode code points. Only `approval.requested` includes `approvalId`. Prompt, approval parameters, errors, and environment variables are omitted; exact occurrences of the notification URL/key are redacted from payload text. Job output should not contain other secrets: arbitrary secrets in model output cannot be identified automatically.
 

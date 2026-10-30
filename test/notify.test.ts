@@ -15,7 +15,7 @@ let received: Array<{ auth: string | null; contentType: string | null; body: any
 beforeEach(async () => {
   savedEnv = { ...process.env };
   tmp = await mkdtemp(join(import.meta.dir, "tmp-notify-"));
-  process.env.CODEXCTL_STATE_DIR = join(tmp, "state");
+  process.env.CODEXCTL_HOME = join(tmp, "state");
   delete process.env.CODEXCTL_WORKER_ID;
   received = [];
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -66,7 +66,7 @@ async function waitExited(key: string) {
 }
 
 async function start(key = "demo") {
-  return runJob({ key, repo: root, prompt: "fixture only", timeoutMs: 3000, intervalMs: 10 });
+  return runJob({ key, repo: root, prompt: "fixture only" });
 }
 
 async function assertPrivate(key = "demo") {

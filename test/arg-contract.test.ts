@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { assertJobKey } from "../src/app-server.ts";
 import { parseArgs } from "../src/cli.ts";
 import { isApprovalRequest } from "../src/events.ts";
-import { codexctlHome, stateRoot } from "../src/state.ts";
+import { codexctlHome, jobsRoot } from "../src/state.ts";
 import {
   approvalResponseFor,
   cancelJob,
@@ -27,7 +27,7 @@ const cliPath = join(import.meta.dir, "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dir, "..");
 
 beforeEach(() => {
-  process.env.CODEXCTL_STATE_DIR = ".codexctl";
+  process.env.CODEXCTL_HOME = ".codexctl";
   delete process.env.CODEXCTL_STATE_REPO;
   process.chdir(repoRoot);
 });
@@ -48,20 +48,12 @@ async function runCli(args: string[], cwd = import.meta.dir): Promise<{ exitCode
 }
 
 describe("cli output contract", () => {
-  test("default state root lives under ~/.codexctl by repo identity", () => {
-    const previousStateDir = process.env.CODEXCTL_STATE_DIR;
-    const previousHome = process.env.CODEXCTL_HOME;
-    try {
-      delete process.env.CODEXCTL_STATE_DIR;
-      process.env.CODEXCTL_HOME = "/tmp/codexctl-home-test";
-      expect(codexctlHome()).toBe("/tmp/codexctl-home-test");
-      expect(stateRoot("/tmp/example-repo").startsWith("/tmp/codexctl-home-test/repos/example-repo-")).toBe(true);
-    } finally {
-      if (previousStateDir === undefined) delete process.env.CODEXCTL_STATE_DIR;
-      else process.env.CODEXCTL_STATE_DIR = previousStateDir;
-      if (previousHome === undefined) delete process.env.CODEXCTL_HOME;
-      else process.env.CODEXCTL_HOME = previousHome;
-    }
+  test("state root is global under CODEXCTL_HOME", () => {
+    const previous = process.env.CODEXCTL_HOME;
+    process.env.CODEXCTL_HOME = "/tmp/codexctl-home-test";
+    expect(codexctlHome()).toBe("/tmp/codexctl-home-test");
+    expect(jobsRoot()).toBe("/tmp/codexctl-home-test/jobs");
+    process.env.CODEXCTL_HOME = previous;
   });
 
   test("inline flags preserve equals in values", () => {
@@ -70,11 +62,10 @@ describe("cli output contract", () => {
     expect(args.flags.get("prompt")).toBe("a=b");
   });
 
-  test("public commands require --json", async () => {
+  test("public commands return JSON without --json", async () => {
     const result = await runCli(["job", "list"]);
-    expect(result.exitCode).toBe(2);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Public commands require --json");
+    expect(result.exitCode).toBe(0);
+    expect(Array.isArray(JSON.parse(result.stdout))).toBe(true);
   });
 
   test("--json errors are structured for machine callers", async () => {
@@ -91,7 +82,7 @@ describe("cli output contract", () => {
   });
 
   test("job run validates required prompt before spawning", async () => {
-    const result = await runCli(["job", "run", "--key=missing-prompt", "--timeout-ms", "1", "--json"]);
+    const result = await runCli(["job", "run", "--key=missing-prompt", "--json"]);
     expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toEqual({
@@ -142,7 +133,7 @@ describe("cli output contract", () => {
     });
   });
 
-  test("job run validates wait flags before spawning", async () => {
+  test("job run rejects wait flags", async () => {
     const result = await runCli(["job", "run", "--key=bad-wait", "--prompt", "hello", "--timeout-ms", "", "--json"]);
     expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
@@ -150,16 +141,16 @@ describe("cli output contract", () => {
       ok: false,
       error: {
         code: "invalid_flag",
-        message: "--timeout-ms must be a positive integer",
+        message: "Unknown flag --timeout-ms",
       },
     });
   });
 
-  test("help is human-readable without --json", async () => {
+  test("help returns JSON without --json", async () => {
     const result = await runCli(["--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("codexctl job run");
+    expect(JSON.parse(result.stdout).usage).toContain("codexctl job run");
   });
 
   test("help supports --json", async () => {
@@ -288,12 +279,8 @@ describe("raw job events", () => {
 
       const summary = await readJobSummary("summary-test", 1);
       expect(summary.status).toBe("completed");
-      expect(summary.nextAction).toBe("read_result");
       expect(summary.finalResponse).toBe("done");
-      expect(summary.pendingApprovals).toHaveLength(1);
-      expect(summary.actionableApprovals).toHaveLength(0);
-      expect(summary.canResolveApprovals).toBe(false);
-      expect(summary.approvalCounts.pending).toBe(1);
+      expect(summary.pendingApprovals).toEqual({ count: 1, ids: ["approval-1"] });
       expect(summary.recentEvents).toEqual((await readJobEvents("summary-test")).slice(-1));
 
       const cli = await runCli(["job", "summary", "summary-test", "--events", "1", "--json"], tmp);
@@ -307,7 +294,7 @@ describe("raw job events", () => {
         ready: true,
         reason: "terminal",
         status: "completed",
-        nextAction: "read_result",
+
       });
       expect(wait.summary.finalResponse).toBe("done");
 
@@ -318,7 +305,7 @@ describe("raw job events", () => {
         ready: true,
         reason: "terminal",
         status: "completed",
-        nextAction: "read_result",
+
         summary: {
           finalResponse: "done",
         },
@@ -360,9 +347,9 @@ describe("raw job events", () => {
         ready: true,
         reason: "approval_required",
         status: "running",
-        nextAction: "resolve_approval",
+
       });
-      expect(wait.summary.actionableApprovals).toHaveLength(1);
+      expect(wait.summary.pendingApprovals.count).toBe(1);
     } finally {
       process.chdir(cwd);
       await rm(tmp, { recursive: true, force: true });
@@ -382,7 +369,7 @@ describe("raw job events", () => {
         ready: false,
         reason: "timeout",
         status: "queued",
-        nextAction: "wait",
+
       });
       expect(wait.timeoutMs).toBe(1);
       expect(wait.summary.recentEvents).toEqual([]);
@@ -393,7 +380,7 @@ describe("raw job events", () => {
         ready: false,
         reason: "timeout",
         status: "queued",
-        nextAction: "wait",
+
       });
     } finally {
       process.chdir(cwd);
@@ -550,7 +537,7 @@ describe("event store", () => {
         ready: false,
         reason: "timeout",
         ignoredApprovalIds: ["approval-1"],
-        nextAction: "resolve_approval",
+
       });
 
       await createJob({ key: "approval-wait-cli", repo: ".", prompt: "hello" });
@@ -677,89 +664,9 @@ describe("event store", () => {
     }
   });
 
-  test("cancelJob enqueues an interrupt control command for running jobs", async () => {
-    const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
-    try {
-      process.chdir(tmp);
-      await createJob({ key: "cancel-running-test", repo: ".", prompt: "hello" });
-      const jobPath = ".codexctl/jobs/cancel-running-test/job.json";
-      const job = await Bun.file(jobPath).json();
-      job.status = "running";
-      job.workerPid = process.pid;
-      job.threadId = "thread-1";
-      job.turnId = "turn-1";
-      await Bun.write(jobPath, JSON.stringify(job));
 
-      const result = await cancelJob("cancel-running-test");
-      expect(result.action).toBe("interrupt_queued");
-      expect(result.command?.type).toBe("turn.interrupt");
-      if (!result.command) throw new Error("expected cancel command");
-      expect(typeof result.job.cancelRequestedAt).toBe("string");
-      const summary = await readJobSummary("cancel-running-test", 0);
-      expect(summary.nextAction).toBe("wait_cancel");
-      expect(summary.canResolveApprovals).toBe(false);
-      expect(await Bun.file(".codexctl/jobs/cancel-running-test/control.jsonl").text()).toContain("turn.interrupt");
 
-      const staleWorkerRecord = await Bun.file(jobPath).json();
-      staleWorkerRecord.cancelRequestedAt = null;
-      staleWorkerRecord.cancelCommandId = null;
-      await Bun.write(jobPath, JSON.stringify(staleWorkerRecord));
-      const persistedSummary = await readJobSummary("cancel-running-test", 0);
-      expect(persistedSummary.nextAction).toBe("wait_cancel");
-      expect(persistedSummary.cancelRequestedAt).toBe(result.command?.at);
-      expect(persistedSummary.cancelCommandId).toBe(result.command?.id);
-      const cancelListItem = (await listJobs()).find((candidate) => candidate.key === "cancel-running-test");
-      expect(cancelListItem?.nextAction).toBe("wait_cancel");
-      expect(cancelListItem?.cancelRequestedAt).toBe(result.command?.at);
 
-      const cli = await runCli(["job", "cancel", "cancel-running-test", "--json"], tmp);
-      expect(cli.exitCode).toBe(0);
-      expect(JSON.parse(cli.stdout).action).toBe("already_requested");
-
-      const waitCli = await runCli(["job", "cancel", "cancel-running-test", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
-      expect(waitCli.exitCode).toBe(0);
-      expect(JSON.parse(waitCli.stdout)).toMatchObject({
-        cancel: {
-          action: "already_requested",
-        },
-        wait: {
-          ready: false,
-          reason: "timeout",
-          nextAction: "wait_cancel",
-        },
-      });
-    } finally {
-      process.chdir(cwd);
-      await rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("cancelJob fails stale in-flight jobs instead of queuing unreachable interrupts", async () => {
-    const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
-    try {
-      process.chdir(tmp);
-      await createJob({ key: "cancel-stale-test", repo: ".", prompt: "hello" });
-      const jobPath = ".codexctl/jobs/cancel-stale-test/job.json";
-      const job = await Bun.file(jobPath).json();
-      job.status = "running";
-      job.workerPid = null;
-      job.threadId = "thread-1";
-      job.turnId = "turn-1";
-      await Bun.write(jobPath, JSON.stringify(job));
-
-      const result = await cancelJob("cancel-stale-test");
-      expect(result.action).toBe("failed");
-      expect(result.job.status).toBe("failed");
-      expect(result.job.error).toContain("cannot be interrupted");
-      expect(await Bun.file(".codexctl/jobs/cancel-stale-test/control.jsonl").text()).toBe("");
-      expect(await Bun.file(".codexctl/jobs/cancel-stale-test/events.jsonl").text()).toContain("cancel.failed");
-    } finally {
-      process.chdir(cwd);
-      await rm(tmp, { recursive: true, force: true });
-    }
-  });
 
   test("removeJob removes terminal jobs and refuses active live workers", async () => {
     const cwd = process.cwd();
@@ -845,7 +752,7 @@ describe("job control files", () => {
       await expect(createJob({ key: "live-force-test", repo: ".", prompt: "replacement", force: true })).rejects.toThrow("cancel or wait before replacing it");
       expect((await Bun.file(jobPath).json()).prompt).toBe("hello");
 
-      const cli = await runCli(["job", "run", "--key", "live-force-test", "--repo", ".", "--prompt", "replacement", "--force", "--timeout-ms", "1", "--json"], tmp);
+      const cli = await runCli(["job", "run", "--key", "live-force-test", "--repo", ".", "--prompt", "replacement", "--force", "--json"], tmp);
       expect(cli.exitCode).toBe(2);
       expect(JSON.parse(cli.stderr).error).toMatchObject({
         code: "job_worker_alive",
@@ -856,43 +763,9 @@ describe("job control files", () => {
     }
   });
 
-  test("createJob breaks stale job record locks", async () => {
-    const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
-    try {
-      process.chdir(tmp);
-      await mkdir(".codexctl/jobs/lock-test/job.lock", { recursive: true });
-      await Bun.write(".codexctl/jobs/lock-test/job.lock/owner.json", JSON.stringify({
-        pid: 999_999_999,
-        createdAt: new Date().toISOString(),
-      }));
-      await createJob({ key: "lock-test", repo: ".", prompt: "hello" });
-      expect(await Bun.file(".codexctl/jobs/lock-test/job.lock").exists()).toBe(false);
-      expect((await Bun.file(".codexctl/jobs/lock-test/job.json").json()).key).toBe("lock-test");
-    } finally {
-      process.chdir(cwd);
-      await rm(tmp, { recursive: true, force: true });
-    }
-  });
 
-  test("createJob breaks stale job record locks with invalid owner metadata", async () => {
-    const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
-    try {
-      process.chdir(tmp);
-      const lockDir = ".codexctl/jobs/invalid-lock-test/job.lock";
-      await mkdir(lockDir, { recursive: true });
-      await Bun.write(`${lockDir}/owner.json`, "null");
-      const staleTime = new Date(Date.now() - 31_000);
-      await utimes(lockDir, staleTime, staleTime);
-      await createJob({ key: "invalid-lock-test", repo: ".", prompt: "hello" });
-      expect(await Bun.file(lockDir).exists()).toBe(false);
-      expect((await Bun.file(".codexctl/jobs/invalid-lock-test/job.json").json()).key).toBe("invalid-lock-test");
-    } finally {
-      process.chdir(cwd);
-      await rm(tmp, { recursive: true, force: true });
-    }
-  });
+
+
 
   test("enqueueSteer appends a control command for running jobs", async () => {
     const cwd = process.cwd();
@@ -917,7 +790,7 @@ describe("job control files", () => {
       expect(waited.wait).toMatchObject({
         ready: false,
         reason: "timeout",
-        nextAction: "wait",
+
       });
 
       const cli = await runCli(["job", "steer", "steer-test", "--prompt", "cli-adjust", "--wait", "--events", "0", "--timeout-ms", "1", "--interval-ms", "1", "--json"], tmp);
@@ -929,7 +802,7 @@ describe("job control files", () => {
         wait: {
           ready: false,
           reason: "timeout",
-          nextAction: "wait",
+
         },
       });
     } finally {
@@ -938,38 +811,7 @@ describe("job control files", () => {
     }
   });
 
-  test("cancelJob marks queued jobs cancelled without a worker command", async () => {
-    const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
-    try {
-      process.chdir(tmp);
-      await createJob({ key: "cancel-queued-test", repo: ".", prompt: "hello" });
-      const result = await cancelJob("cancel-queued-test");
-      expect(result.action).toBe("cancelled");
-      expect(result.command).toBeNull();
-      expect(result.job.status).toBe("cancelled");
-      expect(result.job.error).toBeNull();
-      expect((await readJobSummary("cancel-queued-test", 0)).nextAction).toBe("cancelled");
-      expect(await Bun.file(".codexctl/jobs/cancel-queued-test/events.jsonl").text()).toContain("job.cancelled");
 
-      await createJob({ key: "cancel-queued-wait-test", repo: ".", prompt: "hello" });
-      const waited = await cancelJobAndWait("cancel-queued-wait-test", {
-        eventLimit: 0,
-        intervalMs: 1,
-        timeoutMs: 10,
-      });
-      expect(waited.cancel.action).toBe("cancelled");
-      expect(waited.wait).toMatchObject({
-        ready: true,
-        reason: "terminal",
-        status: "cancelled",
-        nextAction: "cancelled",
-      });
-    } finally {
-      process.chdir(cwd);
-      await rm(tmp, { recursive: true, force: true });
-    }
-  });
 
   test("listJobs summarizes jobs", async () => {
     const cwd = process.cwd();
