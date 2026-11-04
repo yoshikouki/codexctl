@@ -36,6 +36,8 @@ Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the s
 
 For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and pass that path to `--repo`. The caller creates worktrees with Git.
 
+codexctl runs each task in its worktree and assigns the Codex thread to the project for the main Git checkout. It reuses a project with that checkout as a root, or creates one named after the repository. Finished tasks resumed with `job steer` receive the same project assignment. Non-Git directories keep Codex's default project behavior.
+
 Example for this repository, using unused keys and branches:
 
 ```sh

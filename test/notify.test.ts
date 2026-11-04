@@ -31,6 +31,8 @@ const send = (message) => console.log(JSON.stringify(message));
 for await (const line of console) {
   const m = JSON.parse(line);
   if (m.method === "initialize") send({id:m.id,result:{}});
+  if (m.method === "project/list") send({id:m.id,result:{data:[],nextCursor:null}});
+  if (m.method === "project/create") send({id:m.id,result:{project:{id:"project-test"}}});
   if (m.method === "thread/start") send({id:m.id,result:{thread:{id:"thread-test"}}});
   if (m.method === "turn/start") {
     send({id:m.id,result:{turn:{id:"turn-test"}}});
@@ -93,6 +95,8 @@ for (const [mode, status] of [["completed", "completed"], ["failed", "failed"], 
     expect(Number.isNaN(Date.parse(received[0]!.body.at))).toBe(false);
     const sent = (await readJobEvents("demo") as any[]).filter(e => e.event?.type === "notify.sent");
     expect(sent).toHaveLength(1);
+    const started = (await readJobEvents("demo") as any[]).find(e => e.message?.method === "thread/start");
+    expect(started.message.params).toEqual({ cwd: root, projectId: "project-test" });
     expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status: "sent", at: sent[0].at });
     await assertPrivate();
   });
