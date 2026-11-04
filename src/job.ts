@@ -390,11 +390,11 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
       ...(record.threadId ? { threadId: record.threadId } : {}),
       cwd: record.repo,
       ...(!record.threadId && projectId ? { projectId } : {}),
-    }) as { thread?: { id?: string } };
+    }) as { thread?: { id?: string; projectId?: string | null } };
     const threadId = threadResult.thread?.id;
     if (!threadId) throw new Error(`${threadMethod} response did not include thread.id`);
     record.threadId = threadId;
-    if (threadMethod === "thread/resume" && projectId) {
+    if (threadMethod === "thread/resume" && projectId && !threadResult.thread?.projectId) {
       await client.request("thread/metadata/update", { threadId, projectId });
     }
 
