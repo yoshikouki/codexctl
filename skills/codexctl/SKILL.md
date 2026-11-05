@@ -11,7 +11,7 @@ codexctl is a thin control layer for Codex. Sandboxing and approvals follow Code
 
 1. Check commands with `codexctl --help`. If the CLI is unavailable, read [setup.md](references/setup.md).
 2. Choose a key for the job. Include the goal, target, whether changes are allowed, constraints, and expected report in the prompt.
-3. For parallel edits, prepare a worktree per job. See [workflows.md](references/workflows.md).
+3. For parallel edits, prepare a worktree for each task with the repository name as its final directory (for example, `<key>/<repo>`), then pass it to `--repo`. See [workflows.md](references/workflows.md).
 
 ```sh
 codexctl job run --repo . --key review --prompt "Review this repository and report issues. Do not modify files."
