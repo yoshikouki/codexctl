@@ -75,7 +75,7 @@ For `item/permissions/requestApproval`, the requested permissions are returned u
 
 ## Parallel work and notifications
 
-The caller creates each worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and passes it to `job run` with `--repo`. Start each job, then check results with `job list` and `job wait` for each key.
+The caller creates each worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>/<repo>` on branch `codex/<key>` and passes it to `job run` with `--repo`. The final directory name matches the repository name so sessions group under that repository in the observed iPhone Codex list. Start each job, then check results with `job list` and `job wait` for each key.
 
 Every CLI invocation and worker loads `~/.config/codexctl/env` by default, using `$HOME`. Set `env_file = "path/to/env"` in `~/.config/codexctl/config.toml` to override it; `~` expands to `$HOME` and relative paths resolve against the config directory. Existing environment variables win; missing files are ignored. Protect the env file with `chmod 600`.
 

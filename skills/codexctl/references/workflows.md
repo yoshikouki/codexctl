@@ -3,7 +3,7 @@
 ## Run in parallel with worktrees
 
 1. Choose an unused key. Do not reuse keys within the same `CODEXCTL_HOME`, even across repositories.
-2. Use Git to create a worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>`.
+2. Use Git to create a worktree at `~/src/worktrees/github.com/<owner>/<repo>/<key>/<repo>` on branch `codex/<key>`. Keep the final directory name equal to the repository name so the iPhone Codex list groups the session there.
 3. Pass the worktree path to `job run` with `--repo`. Include the goal, constraints, whether changes are allowed, and expected report in the prompt.
 4. Start each job, then check `job list` and `job wait` for each key. See the [README](../../../README.md#parallel-work-with-worktrees) for a creation example.
 

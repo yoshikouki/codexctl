@@ -34,18 +34,18 @@ Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the s
 
 ## Parallel work with worktrees
 
-For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>` on branch `codex/<key>` and pass that path to `--repo`. The caller creates worktrees with Git.
+For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>/<repo>` on branch `codex/<key>` and pass that path to `--repo`. Keep the worktree's final directory name equal to the repository name. In the observed iPhone Codex list, this groups sessions under the repository even when Git created the worktree and codexctl started the session. The caller creates worktrees with Git.
 
-codexctl runs each task in its worktree and assigns the Codex thread to the project for the main Git checkout. It reuses a project with that checkout as a root, or creates one named after the repository. Finished tasks resumed with `job steer` receive the same project assignment. Non-Git directories keep Codex's default project behavior.
+codexctl runs each task in its worktree and assigns the Codex thread to the project for the main Git checkout. It reuses a project with that checkout as a root, or creates one named after the repository. Finished tasks resumed with `job steer` receive the same project assignment. This project assignment alone did not group differently named worktrees in the observed iPhone list. Non-Git directories keep Codex's default project behavior.
 
 Example for this repository, using unused keys and branches:
 
 ```sh
-mkdir -p "$HOME/src/worktrees/github.com/yoshikouki/codexctl"
-git worktree add -b codex/docs-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" HEAD
-git worktree add -b codex/tests-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" HEAD
-codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" --key docs-review --prompt "Review the documentation and report inconsistencies. Do not modify files."
-codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review" --key tests-review --prompt "Review the tests and report gaps. Do not modify files."
+mkdir -p "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review" "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review"
+git worktree add -b codex/docs-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review/codexctl" HEAD
+git worktree add -b codex/tests-review "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review/codexctl" HEAD
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/docs-review/codexctl" --key docs-review --prompt "Review the documentation and report inconsistencies. Do not modify files."
+codexctl job run --repo "$HOME/src/worktrees/github.com/yoshikouki/codexctl/tests-review/codexctl" --key tests-review --prompt "Review the tests and report gaps. Do not modify files."
 codexctl job list
 codexctl job wait docs-review --timeout-ms 600000
 codexctl job wait tests-review --timeout-ms 600000
