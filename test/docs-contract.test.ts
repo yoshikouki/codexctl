@@ -10,7 +10,7 @@ test("documented commands and flags exist in the CLI, including per-command flag
     const allowed = match[3]!.match(/allowFlags\(args, \[([^\]]*)\]/)![1]!;
     commands.set(`${match[1]} ${match[2]}`, new Set([...allowed.matchAll(/"([^"]+)"/g)].map(m => m[1]!)));
   }
-  const publicFlags = new Set([...commands.values()].flatMap(flags => [...flags]).concat("help"));
+  const publicFlags = new Set([...commands.values()].flatMap(flags => [...flags]).concat("help", "json")); // --json is parsed and ignored by parseArgs; output is always JSON.
   const files = ["README.md", "docs/codexctl-agent-contract.md"];
   for await (const path of new Bun.Glob("skills/codexctl/**/*.md").scan(root)) files.push(path);
   for (const file of files) {

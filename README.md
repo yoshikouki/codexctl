@@ -30,7 +30,7 @@ codexctl job wait demo --timeout-ms 600000
 
 Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the same `threadId`. Jobs without a `threadId` cannot resume; instead, use a new key to create a job.
 
-`job summary` includes saved `progress`: `current` (`type`, `startedAt`, and a command limited to 200 characters for command execution), `lastCommentary` (latest completed commentary, limited to 500 characters), `commands: { run, failed }`, and `totalTokens`. Counts span all turns in the job; unavailable values are null and counts start at zero. `current` clears on matching item completion or turn completion. Progress is pull-only; summary reads `job.json` and only the requested event tail.
+`job summary` includes saved `progress`: `current` (`type`, `startedAt`, and a command limited to 200 Unicode code points for command execution), `lastCommentary` (latest completed commentary, limited to 500 Unicode code points), `commands: { run, failed }`, and `totalTokens`. Counts span all turns in the job; unavailable values are null and counts start at zero. `current` clears on matching item completion or turn completion. Progress is pull-only; summary reads `job.json` and only the requested event tail.
 
 ## Parallel work with worktrees
 
