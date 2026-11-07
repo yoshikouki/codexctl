@@ -5,8 +5,8 @@
     "": {
       "name": "@yoshikouki/codexctl",
       "devDependencies": {
-        "@types/bun": "latest",
-        "typescript": "latest",
+        "@types/bun": "^1.4.4",
+        "typescript": "^6.0.3",
       },
     },
   },

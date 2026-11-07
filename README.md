@@ -6,7 +6,7 @@ Sandboxing and approvals follow Codex's own settings, including `~/.codex/config
 
 ## Run
 
-Requires Bun and an installed Codex with app-server support. To run from the repository:
+Requires Bun 1.4.4 (the `packageManager` field in `package.json` is the single source of truth; CI installs the same version) and an installed Codex with app-server support. To run from the repository:
 
 ```sh
 bun run src/cli.ts --help
