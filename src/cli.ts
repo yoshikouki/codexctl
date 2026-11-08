@@ -188,6 +188,7 @@ export function parseArgs(argv: string[]): Args {
     const flag = arg.slice(2);
     const equalsIndex = flag.indexOf("=");
     const name = equalsIndex >= 0 ? flag.slice(0, equalsIndex) : flag;
+    // Output is always JSON. --json is accepted and ignored so callers written against older releases keep working.
     if (name === "json") continue;
     if (!name) throw new CliError("invalid_flag", "Flag name cannot be empty");
     if (equalsIndex >= 0) {
@@ -312,8 +313,8 @@ function usageText(): string {
   codexctl approval approve <job-key> <approval-id> [--for-session] [--wait]
   codexctl approval reject <job-key> <approval-id> [--cancel] [--wait]
 
-Summary progress: current item (type, startedAt; command execution includes command, up to 200 characters),
-lastCommentary (latest completed commentary, up to 500 characters), commands (run/failed across turns), and totalTokens.
+Summary progress: current item (type, startedAt; command execution includes command, up to 200 Unicode code points),
+lastCommentary (latest completed commentary, up to 500 Unicode code points), commands (run/failed across turns), and totalTokens.
 Unavailable values are null; counts start at zero. current clears on matching item completion or turn completion.
 Summary reads saved progress and lastNotification from job.json, plus only the requested event tail.
 

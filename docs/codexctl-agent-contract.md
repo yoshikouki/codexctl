@@ -4,7 +4,7 @@ codexctl is a thin control layer for an installed Codex's app-server. A detached
 
 ## Commands and output
 
-Use `codexctl --help` to list public commands. Help returns `{ usage }`. Normal output is JSON. Errors write `{ ok: false, error: { code, message } }` to stderr and exit with a nonzero code. Only `job events` outputs raw JSONL.
+Use `codexctl --help` to list public commands. Help returns `{ usage }`. Normal output is JSON. Errors write `{ ok: false, error: { code, message } }` to stderr and exit with a nonzero code. Only `job events` outputs raw JSONL. `--json` is accepted and ignored on every command because output is always JSON.
 
 Placeholders such as `<key>`, `<prompt>`, and `<id>` represent arguments.
 

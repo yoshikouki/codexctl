@@ -30,7 +30,6 @@ beforeEach(async () => {
   testHome = await mkdtemp("/tmp/codexctl-args-");
   process.env.HOME = testHome;
   process.env.CODEXCTL_HOME = ".codexctl";
-  delete process.env.CODEXCTL_STATE_REPO;
   process.chdir(repoRoot);
 });
 

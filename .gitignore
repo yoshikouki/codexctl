@@ -1,6 +1,4 @@
 .codexctl/
-.codexctl-schema/
-.codexctl-ts/
 node_modules/
 *.log
 

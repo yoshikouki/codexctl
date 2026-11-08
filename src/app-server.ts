@@ -1,19 +1,19 @@
 import type { ReadableStreamDefaultReader as NodeReadableStreamDefaultReader } from "node:stream/web";
 
-export type JsonObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 
-export type JsonRpcRequest = {
+type JsonRpcRequest = {
   id: number;
   method: string;
   params?: unknown;
 };
 
-export type JsonRpcNotification = {
+type JsonRpcNotification = {
   method: string;
   params?: unknown;
 };
 
-export type JsonRpcResponse = {
+type JsonRpcResponse = {
   id: number;
   result?: unknown;
   error?: {
@@ -23,7 +23,7 @@ export type JsonRpcResponse = {
   };
 };
 
-export type JsonRpcClientResponse = {
+type JsonRpcClientResponse = {
   id: string | number;
   result?: unknown;
   error?: {
@@ -33,7 +33,7 @@ export type JsonRpcClientResponse = {
   };
 };
 
-export type JsonRpcServerRequest = {
+type JsonRpcServerRequest = {
   id: string | number;
   method: string;
   params?: unknown;

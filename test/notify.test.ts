@@ -5,9 +5,15 @@ import { createJob, readJob, readJobEvents, readJobSummary, runJob, enqueueAppro
 import { sendJobNotification } from "../src/notify.ts";
 import { jobDir } from "../src/state.ts";
 
-const root = join(import.meta.dir, "..");
-const cli = join(root, "src/cli.ts");
+const git = (...args: string[]) => {
+  const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+};
+
+const cli = join(import.meta.dir, "..", "src/cli.ts");
 let tmp: string;
+// A fresh Git repository per test: jobs need a Git checkout to get a Codex project, and the test process may run outside one.
+let repo: string;
 let savedEnv: NodeJS.ProcessEnv;
 let server: ReturnType<typeof Bun.serve>;
 let received: Array<{ auth: string | null; contentType: string | null; body: any }>;
@@ -17,6 +23,9 @@ beforeEach(async () => {
   tmp = await mkdtemp(join(import.meta.dir, "tmp-notify-"));
   process.env.HOME = tmp;
   process.env.CODEXCTL_HOME = join(tmp, "state");
+  repo = join(tmp, "repo");
+  git("init", "-q", repo);
+  git("-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "Initial");
   delete process.env.CODEXCTL_WORKER_ID;
   received = [];
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -69,7 +78,7 @@ async function waitExited(key: string) {
 }
 
 async function start(key = "demo") {
-  return runJob({ key, repo: root, prompt: "fixture only" });
+  return runJob({ key, repo, prompt: "fixture only" });
 }
 
 async function assertPrivate(key = "demo", url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!) {
@@ -88,7 +97,7 @@ for (const [mode, status] of [["completed", "completed"], ["failed", "failed"], 
     expect((await readJob("demo")).status).toBe(status);
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({ auth: "Bearer test-notification-secret", contentType: "application/json", body: {
-      source: "codexctl", event: `job.${status}`, key: "demo", status, repo: root, threadId: "thread-test",
+      source: "codexctl", event: `job.${status}`, key: "demo", status, repo, threadId: "thread-test",
     } });
     expect(received[0]!.body).not.toHaveProperty("approvalId");
     expect(Array.from(received[0]!.body.finalResponse).length).toBeLessThanOrEqual(2000);
@@ -96,7 +105,7 @@ for (const [mode, status] of [["completed", "completed"], ["failed", "failed"], 
     const sent = (await readJobEvents("demo") as any[]).filter(e => e.event?.type === "notify.sent");
     expect(sent).toHaveLength(1);
     const started = (await readJobEvents("demo") as any[]).find(e => e.message?.method === "thread/start");
-    expect(started.message.params).toEqual({ cwd: root, projectId: "project-test" });
+    expect(started.message.params).toEqual({ cwd: repo, projectId: "project-test" });
     expect((await readJobSummary("demo", 0)).lastNotification).toEqual({ status: "sent", at: sent[0].at });
     await assertPrivate();
   });
@@ -113,7 +122,7 @@ for (const caller of ["CLI", "worker only"]) {
     if (caller === "worker only") {
       await start();
     } else {
-      const proc = Bun.spawn([process.execPath, cli, "job", "run", "--key", "demo", "--repo", root, "--prompt", "fixture only"], {
+      const proc = Bun.spawn([process.execPath, cli, "job", "run", "--key", "demo", "--repo", repo, "--prompt", "fixture only"], {
         env: process.env, stdout: "pipe", stderr: "pipe",
       });
       const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
@@ -186,7 +195,7 @@ test("unset URL records one skip per approval ID and then completion", async () 
 });
 
 test("summary reads worker notification results from job.json without the event log", async () => {
-  await createJob({ key: "demo", repo: root, prompt: "fixture" });
+  await createJob({ key: "demo", repo, prompt: "fixture" });
   expect((await readJobSummary("demo", 0)).lastNotification).toBeNull();
   for (const status of ["sent", "failed", "skipped"] as const) {
     if (status === "failed") server.reload({ fetch: () => new Response("", { status: 500 }) });
@@ -212,7 +221,7 @@ async function manual() {
 }
 
 test("manual status notification does not change the job", async () => {
-  await createJob({ key: "demo", repo: root, prompt: "fixture" });
+  await createJob({ key: "demo", repo, prompt: "fixture" });
   const before = await readJob("demo");
   const result = await manual();
   expect(result).toMatchObject({ code: 0, stderr: "" });
@@ -247,7 +256,7 @@ for (const status of [302, 401, 500]) {
 }
 
 test("missing key fails without sending; known notification secrets are redacted", async () => {
-  const job = await createJob({ key: "demo", repo: root, prompt: "fixture" });
+  const job = await createJob({ key: "demo", repo, prompt: "fixture" });
   job.finalResponse = `${process.env.CODEXCTL_GROK_BOT_NOTIFY_URL} ${process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY} ${"😀".repeat(2100)}`;
   expect(await sendJobNotification(jobDir("demo"), job, "job.status")).toEqual({ ok: true });
   expect(received[0]!.body.finalResponse.startsWith("[REDACTED] [REDACTED]")).toBe(true);
@@ -259,7 +268,7 @@ test("missing key fails without sending; known notification secrets are redacted
 
 test("request times out after ten seconds without changing the job", async () => {
   server.reload({ fetch: () => new Promise<Response>(() => {}) });
-  const job = await createJob({ key: "demo", repo: root, prompt: "fixture" });
+  const job = await createJob({ key: "demo", repo, prompt: "fixture" });
   const started = Date.now();
   expect(await sendJobNotification(jobDir("demo"), job, "job.status")).toMatchObject({ ok: false, error: { message: "timeout" } });
   expect(Date.now() - started).toBeGreaterThanOrEqual(9900);
