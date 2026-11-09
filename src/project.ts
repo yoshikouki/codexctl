@@ -15,6 +15,24 @@ export function gitProjectRoot(repo: string): string | null {
   return gitDir ? realpathSync(dirname(gitDir)) : null;
 }
 
+export function assertWorktreeRepoName(repo: string): void {
+  const root = gitProjectRoot(repo);
+  if (!root) return;
+  const result = Bun.spawnSync(["git", "-C", repo, "rev-parse", "--show-toplevel"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  if (result.exitCode !== 0) return;
+  const worktree = realpathSync(result.stdout.toString().trim());
+  const name = basename(root);
+  if (worktree === root || basename(worktree) === name) return;
+
+  throw Object.assign(
+    new Error(`Git worktree '${worktree}' ends in '${basename(worktree)}'; create it with '${name}' as its final directory before starting a Codex job`),
+    { code: "worktree_name_mismatch", exitCode: 2 },
+  );
+}
+
 export async function projectIdForRepo(client: AppServerClient, repo: string): Promise<string | null> {
   const root = gitProjectRoot(repo);
   if (!root) return null;

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { gitProjectRoot, projectIdForRepo } from "../src/project.ts";
+import { assertWorktreeRepoName, gitProjectRoot, projectIdForRepo } from "../src/project.ts";
 import type { AppServerClient } from "../src/app-server.ts";
 
 const git = (...args: string[]) => {
@@ -46,4 +46,28 @@ test("reuses a project whose root is the main checkout", () => withRepo(async (_
   } } as AppServerClient;
   expect(await projectIdForRepo(client, repo)).toBe("existing");
   expect(requests).toEqual(["project/list"]);
+}));
+
+test("a linked worktree must end in the repository name before a job starts", () => withRepo(async (temp, repo) => {
+  const wrong = join(temp, "task-id");
+  git("-C", repo, "worktree", "add", "-q", wrong);
+  expect(() => assertWorktreeRepoName(repo)).not.toThrow();
+  expect(() => assertWorktreeRepoName(wrong)).toThrow("create it with 'repo' as its final directory");
+
+  const correct = join(temp, "another-task", "repo");
+  git("-C", repo, "worktree", "add", "-q", correct);
+  expect(() => assertWorktreeRepoName(correct)).not.toThrow();
+}));
+
+test("job run rejects a mismatched worktree without creating job state", () => withRepo(async (temp, repo) => {
+  const wrong = join(temp, "task-id");
+  git("-C", repo, "worktree", "add", "-q", wrong);
+  const home = join(temp, "codexctl-home");
+  const result = Bun.spawnSync([
+    process.execPath, join(import.meta.dir, "../src/cli.ts"), "job", "run",
+    "--repo", wrong, "--key", "example", "--prompt", "Do nothing",
+  ], { env: { ...process.env, CODEXCTL_HOME: home }, stdout: "pipe", stderr: "pipe" });
+  expect(result.exitCode).toBe(2);
+  expect(JSON.parse(result.stderr.toString()).error.code).toBe("worktree_name_mismatch");
+  expect(await Bun.file(join(home, "jobs", "example", "job.json")).exists()).toBe(false);
 }));

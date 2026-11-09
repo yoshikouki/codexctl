@@ -34,7 +34,7 @@ Steering `completed`, `failed`, or `cancelled` jobs starts a new turn with the s
 
 ## Parallel work with worktrees
 
-For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>/<repo>` on branch `codex/<key>` and pass that path to `--repo`. Keep the worktree's final directory name equal to the repository name. In the observed iPhone Codex list, this groups sessions under the repository even when Git created the worktree and codexctl started the session. The caller creates worktrees with Git.
+For each job, create `~/src/worktrees/github.com/<owner>/<repo>/<key>/<repo>` on branch `codex/<key>` and pass that path to `--repo`. Keep the worktree's final directory name equal to the repository name. `job run` rejects a linked Git worktree with a different final directory before creating a job. In the observed iPhone Codex list, this groups sessions under the repository even when Git created the worktree and codexctl started the session. The caller creates worktrees with Git.
 
 codexctl runs each task in its worktree and assigns the Codex thread to the project for the main Git checkout. It reuses a project with that checkout as a root, or creates one named after the repository. Finished tasks resumed with `job steer` receive the same project assignment. This project assignment alone did not group differently named worktrees in the observed iPhone list. Non-Git directories keep Codex's default project behavior.
 
