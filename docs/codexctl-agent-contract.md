@@ -48,7 +48,7 @@ With `--wait`, the submitted approval's ID is excluded while waiting for complet
 ## State and operations
 
 - State is stored in `~/.codexctl/jobs/<key>/`. Set `CODEXCTL_HOME` to change the home. Keys are unique within the same home and independent of cwd. Only the default `--repo` uses the caller's `.`.
-- Git worktrees share the Codex project rooted at their main checkout. codexctl reuses a matching project or creates one, while keeping the worktree as the thread and turn `cwd`. Resuming a finished task also assigns its thread to that project.
+- Git worktrees share the Codex project rooted at their main checkout. codexctl reuses a matching project or creates one, while keeping the worktree as the thread and turn `cwd`. Resuming a finished task also assigns its thread to that project. `job run` rejects a linked worktree whose final directory differs from the main checkout's name with `worktree_name_mismatch`, before writing the local record.
 - Saved files are `job.json`, `events.jsonl`, `control.jsonl`, `worker.log`, and `worker.err.log`. After creation, only the worker updates `job.json`, replacing it atomically.
 - Steer, cancel, and decisions on approvals append to `control.jsonl`. A response confirms receipt, not application. Without a worker, commands are not processed and waits may time out.
 - Cancel queues an interrupt. Before startup, the worker sets the status to cancelled without starting app-server. Cancelling finished jobs returns `action: "none"`.

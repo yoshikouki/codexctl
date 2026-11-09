@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
 import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents, readTailEvents } from "./events.ts";
 import { sendJobNotification, type NotifyEvent } from "./notify.ts";
-import { projectIdForRepo } from "./project.ts";
+import { assertWorktreeRepoName, projectIdForRepo } from "./project.ts";
 import { jobDir, jobsRoot, codexctlHome } from "./state.ts";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -249,6 +249,7 @@ export async function cancelJob(key: string): Promise<JobCancelResult> {
 
 export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
   const repo = resolve(options.repo);
+  assertWorktreeRepoName(repo);
   const dir = jobDir(options.key);
   await mkdir(jobsRoot(), { recursive: true });
   try {
