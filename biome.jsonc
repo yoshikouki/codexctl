@@ -1,0 +1,247 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
+  "javascript": { "globals": ["Bun"] },
+  "extends": ["ultracite/biome/core"],
+  "files": {
+    "includes": ["!!bun.lock", "!!dist", "!!build"]
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        // Only class/className sorting (linter: useTailwindSortedClasses) is enabled.
+        "organizeImports": "off",
+        "useSortedAttributes": "off",
+        "useSortedKeys": "off",
+        "useSortedEnumMembers": "off",
+        "useSortedInterfaceMembers": "off",
+        "useSortedProperties": "off",
+        "useSortedTypeFields": "off",
+        "useSortedSelectionSet": "off",
+        "useGraphqlSortedDefinitions": "off",
+        "useGraphqlSortedVariables": "off",
+        "useGraphqlSortedArguments": "off",
+        "useSortedPackageJson": "off"
+      }
+    }
+  },
+  // Preserve existing behavior and code structure; only safe automatic fixes are applied.
+  "overrides": [
+    {
+      "includes": ["src/app-server.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off",
+            "useTopLevelRegex": "off"
+          },
+          "style": {
+            "noIncrementDecrement": "off",
+            "useConsistentTypeDefinitions": "off",
+            "useErrorCause": "off",
+            "useReadonlyClassProperties": "off",
+            "useTemplate": "off"
+          },
+          "suspicious": {
+            "noUnnecessaryConditions": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/cli.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off"
+          },
+          "style": {
+            "noIncrementDecrement": "off",
+            "noParameterProperties": "off",
+            "useConsistentTypeDefinitions": "off",
+            "useTemplate": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/env.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off",
+            "useErrorCause": "off",
+            "useNamedCaptureGroup": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/events.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off"
+          },
+          "style": {
+            "noParameterAssign": "off",
+            "useDestructuring": "off",
+            "useTemplate": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/job.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off",
+            "useOptionalChain": "off"
+          },
+          "performance": {
+            "noAwaitInLoops": "off"
+          },
+          "style": {
+            "noIncrementDecrement": "off",
+            "noNestedTernary": "off",
+            "noParameterProperties": "off",
+            "useConsistentTypeDefinitions": "off",
+            "useDestructuring": "off",
+            "useErrorCause": "off",
+            "useTemplate": "off"
+          },
+          "suspicious": {
+            "noUnnecessaryConditions": "off",
+            "useAwait": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/notify.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noEmptyBlockStatements": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/project.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off",
+            "useConsistentTypeDefinitions": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/arg-contract.test.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "useTemplate": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/docs-contract.test.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off",
+            "useTopLevelRegex": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off",
+            "useNamedCaptureGroup": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/env.test.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noLoopFunc": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/lifecycle.test.ts"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedVariables": "off"
+          },
+          "performance": {
+            "noAwaitInLoops": "off",
+            "noDelete": "off"
+          },
+          "style": {
+            "noIncrementDecrement": "off",
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noExplicitAny": "off",
+            "noLoopFunc": "off",
+            "noShadow": "off",
+            "useAwait": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/notify.test.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off"
+          },
+          "style": {
+            "noIncrementDecrement": "off",
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noEmptyBlockStatements": "off",
+            "noExplicitAny": "off",
+            "noLoopFunc": "off",
+            "useAwait": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["test/project.test.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off",
+            "useAwait": "off"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,7 +1,13 @@
 import { appendFile, mkdir, readdir, rm, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AppServerClient, type AppServerEvent } from "./app-server.ts";
-import { appendEvent, isApprovalRequest, readNewCompleteLines, readRawEvents, readTailEvents } from "./events.ts";
+import {
+  appendEvent,
+  isApprovalRequest,
+  readNewCompleteLines,
+  readRawEvents,
+  readTailEvents,
+} from "./events.ts";
 import { sendJobNotification, type NotifyEvent } from "./notify.ts";
 import { assertWorktreeRepoName, projectIdForRepo } from "./project.ts";
 import { jobDir, jobsRoot, codexctlHome } from "./state.ts";
@@ -16,14 +22,19 @@ type JobProgress = {
 };
 
 function emptyProgress(): JobProgress {
-  return { current: null, lastCommentary: null, commands: { run: 0, failed: 0 }, totalTokens: null };
+  return {
+    current: null,
+    lastCommentary: null,
+    commands: { run: 0, failed: 0 },
+    totalTokens: null,
+  };
 }
 
 class JobOperationError extends Error {
   constructor(
     readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable",
     message: string,
-    readonly exitCode = 2,
+    readonly exitCode = 2
   ) {
     super(message);
   }
@@ -49,13 +60,21 @@ export type JobRecord = {
   finalResponse: string;
   latestAgentMessage: string;
   progress: JobProgress;
-  lastNotification: { status: "sent" | "failed" | "skipped"; at: string } | null;
+  lastNotification: {
+    status: "sent" | "failed" | "skipped";
+    at: string;
+  } | null;
   controlOffset: number;
   resumeCommandId: string | null;
   error: string | null;
 };
 
-type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled" | "unsupported";
+type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "cancelled"
+  | "unsupported";
 
 type ApprovalRecord = {
   id: string;
@@ -91,7 +110,10 @@ type TurnInterruptCommand = {
   at: string;
 };
 
-type ControlCommand = TurnSteerCommand | ApprovalResolveCommand | TurnInterruptCommand;
+type ControlCommand =
+  | TurnSteerCommand
+  | ApprovalResolveCommand
+  | TurnInterruptCommand;
 
 type CreateJobOptions = {
   key: string;
@@ -119,8 +141,16 @@ type JobRemoveResult = {
   reason: string;
 };
 
-type JobListItem = Pick<JobRecord,
-  "key" | "jobIncarnation" | "workerId" | "workerPid" | "threadId" | "turnId" | "cancelRequestedAt" | "error"
+type JobListItem = Pick<
+  JobRecord,
+  | "key"
+  | "jobIncarnation"
+  | "workerId"
+  | "workerPid"
+  | "threadId"
+  | "turnId"
+  | "cancelRequestedAt"
+  | "error"
 > & {
   status: JobStatus | "unreadable";
   updatedAt: string | null;
@@ -129,8 +159,20 @@ type JobListItem = Pick<JobRecord,
   actionableApprovals: number;
 };
 
-type JobSummary = Pick<JobRecord,
-  "key" | "status" | "repo" | "threadId" | "turnId" | "createdAt" | "startedAt" | "completedAt" | "finalResponse" | "error" | "progress" | "lastNotification"
+type JobSummary = Pick<
+  JobRecord,
+  | "key"
+  | "status"
+  | "repo"
+  | "threadId"
+  | "turnId"
+  | "createdAt"
+  | "startedAt"
+  | "completedAt"
+  | "finalResponse"
+  | "error"
+  | "progress"
+  | "lastNotification"
 > & {
   pendingApprovals: { count: number; ids: string[] };
   latestAgentMessage: string;
@@ -171,34 +213,43 @@ export async function runJob(options: CreateJobOptions): Promise<JobRecord> {
 export async function listJobs(): Promise<JobListItem[]> {
   const root = jobsRoot();
   const entries = await readJobRootEntries(root);
-  const jobs = await Promise.all(entries
-    .filter((entry) => entry.isDirectory())
-    .map(async (entry): Promise<JobListItem> => {
-      try {
-        const job = await Bun.file(join(root, entry.name, "job.json")).json() as JobRecord;
-        return summarizeJob(job);
-      } catch (error) {
-        return {
-          key: entry.name,
-          jobIncarnation: null,
-          status: "unreadable",
-          updatedAt: null,
-          workerId: null,
-          workerPid: null,
-          workerAlive: null,
-          threadId: null,
-          turnId: null,
-          pendingApprovals: 0,
-          actionableApprovals: 0,
-          cancelRequestedAt: null,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }));
-  return jobs.sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+  const jobs = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry): Promise<JobListItem> => {
+        try {
+          const job = (await Bun.file(
+            join(root, entry.name, "job.json")
+          ).json()) as JobRecord;
+          return summarizeJob(job);
+        } catch (error) {
+          return {
+            key: entry.name,
+            jobIncarnation: null,
+            status: "unreadable",
+            updatedAt: null,
+            workerId: null,
+            workerPid: null,
+            workerAlive: null,
+            threadId: null,
+            turnId: null,
+            pendingApprovals: 0,
+            actionableApprovals: 0,
+            cancelRequestedAt: null,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+  );
+  return jobs.sort((left, right) =>
+    (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "")
+  );
 }
 
-export async function removeJob(key: string, options: JobRemoveOptions = {}): Promise<JobRemoveResult> {
+export async function removeJob(
+  key: string,
+  options: JobRemoveOptions = {}
+): Promise<JobRemoveResult> {
   const dir = jobDir(key);
   let status: JobStatus | "unreadable";
   let job: JobRecord | null = null;
@@ -206,19 +257,26 @@ export async function removeJob(key: string, options: JobRemoveOptions = {}): Pr
     job = await readJob(key);
   } catch (error) {
     if (!options.force) {
-      throw new JobOperationError("job_unreadable", `Job '${key}' could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      throw new JobOperationError(
+        "job_unreadable",
+        `Job '${key}' could not be read: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
   if (job) {
     status = job.status;
     if (job.workerPid !== null && isProcessAlive(job.workerPid)) {
-      throw new JobOperationError("job_worker_alive", `Job '${key}' still has live worker ${job.workerPid}; cancel or wait before removing it`);
+      throw new JobOperationError(
+        "job_worker_alive",
+        `Job '${key}' still has live worker ${job.workerPid}; cancel or wait before removing it`
+      );
     }
-    if (!isTerminalStatus(job.status)) {
-      if (!options.force) {
-        throw new JobOperationError("job_not_terminal", `Job '${key}' is ${job.status}; only terminal jobs can be removed without --force`);
-      }
+    if (!(isTerminalStatus(job.status) || options.force)) {
+      throw new JobOperationError(
+        "job_not_terminal",
+        `Job '${key}' is ${job.status}; only terminal jobs can be removed without --force`
+      );
     }
   } else {
     status = "unreadable";
@@ -240,11 +298,25 @@ export async function cancelJob(key: string): Promise<JobCancelResult> {
   const dir = jobDir(key);
   const job = await readJob(key);
   if (isTerminalStatus(job.status)) {
-    return { action: "none", reason: `job is already ${job.status}`, job, command: null };
+    return {
+      action: "none",
+      reason: `job is already ${job.status}`,
+      job,
+      command: null,
+    };
   }
-  const command: TurnInterruptCommand = { id: crypto.randomUUID(), type: "turn.interrupt", at: new Date().toISOString() };
+  const command: TurnInterruptCommand = {
+    id: crypto.randomUUID(),
+    type: "turn.interrupt",
+    at: new Date().toISOString(),
+  };
   await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-  return { action: "interrupt_queued", reason: "turn interrupt command queued", job, command };
+  return {
+    action: "interrupt_queued",
+    reason: "turn interrupt command queued",
+    job,
+    command,
+  };
 }
 
 export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
@@ -255,11 +327,20 @@ export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
   try {
     await mkdir(dir);
   } catch (error) {
-    if (!isErrorWithCode(error) || error.code !== "EEXIST") throw error;
-    if (!options.force) throw new Error(`Job '${options.key}' already exists; use --force to replace its local record`);
+    if (!isErrorWithCode(error) || error.code !== "EEXIST") {
+      throw error;
+    }
+    if (!options.force) {
+      throw new Error(
+        `Job '${options.key}' already exists; use --force to replace its local record`
+      );
+    }
     const existing = await readJob(options.key);
     if (isProcessAlive(existing.workerPid)) {
-      throw new JobOperationError("job_worker_alive", `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`);
+      throw new JobOperationError(
+        "job_worker_alive",
+        `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`
+      );
     }
   }
   await Bun.write(`${dir}/events.jsonl`, "");
@@ -299,8 +380,18 @@ export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
 function spawnDetachedWorker(key: string, resumeCommandId?: string): void {
   const dir = jobDir(key);
   const proc = Bun.spawn({
-    cmd: [process.execPath, import.meta.resolveSync("./cli.ts"), "internal", "worker", key],
-    env: { ...process.env, CODEXCTL_HOME: codexctlHome(), CODEXCTL_RESUME_COMMAND_ID: resumeCommandId ?? "" },
+    cmd: [
+      process.execPath,
+      import.meta.resolveSync("./cli.ts"),
+      "internal",
+      "worker",
+      key,
+    ],
+    env: {
+      ...process.env,
+      CODEXCTL_HOME: codexctlHome(),
+      CODEXCTL_RESUME_COMMAND_ID: resumeCommandId ?? "",
+    },
     stdin: "ignore",
     stdout: Bun.file(`${dir}/worker.log`),
     stderr: Bun.file(`${dir}/worker.err.log`),
@@ -315,20 +406,29 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   const resumeId = process.env.CODEXCTL_RESUME_COMMAND_ID;
   if (resumeId) {
     // A terminal state is visible before the previous worker finishes its webhook.
-    while (isProcessAlive(record.workerPid)) await Bun.sleep(50);
+    while (isProcessAlive(record.workerPid)) {
+      await Bun.sleep(50);
+    }
     record = await readJob(key);
-    const controls = await readNewCompleteLines(`${dir}/control.jsonl`, record.controlOffset);
+    const controls = await readNewCompleteLines(
+      `${dir}/control.jsonl`,
+      record.controlOffset
+    );
     let offset = record.controlOffset;
     for (const line of controls.lines) {
       offset += Buffer.byteLength(line + "\n");
       const command = JSON.parse(line) as ControlCommand;
-      if (command.id !== resumeId || command.type !== "turn.steer") continue;
-      record.prompt = command.input.map(item => item.text).join("\n");
+      if (command.id !== resumeId || command.type !== "turn.steer") {
+        continue;
+      }
+      record.prompt = command.input.map((item) => item.text).join("\n");
       record.controlOffset = offset;
       record.resumeCommandId = command.id;
       break;
     }
-    if (record.resumeCommandId !== resumeId) throw new Error("Resume command not found");
+    if (record.resumeCommandId !== resumeId) {
+      throw new Error("Resume command not found");
+    }
   }
   record.status = "running";
   record.startedAt = new Date().toISOString();
@@ -347,21 +447,37 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
   await writeJobRecord(dir, record);
   await appendEvent(dir, {
     direction: "worker",
-    event: { type: "worker.started", pid: process.pid, workerId: record.workerId },
+    event: {
+      type: "worker.started",
+      pid: process.pid,
+      workerId: record.workerId,
+    },
     at: new Date().toISOString(),
   });
 
   const processedControlIds = new Set<string>();
   const notifiedApprovals = new Set<string>();
   const currentItem = { id: null as string | null };
-  const notify = (event: NotifyEvent, approvalId?: string) => sendJobNotification(dir, record, event, approvalId, async notification => {
-    record.lastNotification = notification;
-    await writeJobRecord(dir, record);
-  });
+  const notify = (event: NotifyEvent, approvalId?: string) =>
+    sendJobNotification(
+      dir,
+      record,
+      event,
+      approvalId,
+      async (notification) => {
+        record.lastNotification = notification;
+        await writeJobRecord(dir, record);
+      }
+    );
   let client: AppServerClient | undefined;
   try {
-    const queued = await readNewCompleteLines(`${dir}/control.jsonl`, record.controlOffset);
-    const interrupt = queued.lines.map(line => JSON.parse(line) as ControlCommand).find(command => command.type === "turn.interrupt");
+    const queued = await readNewCompleteLines(
+      `${dir}/control.jsonl`,
+      record.controlOffset
+    );
+    const interrupt = queued.lines
+      .map((line) => JSON.parse(line) as ControlCommand)
+      .find((command) => command.type === "turn.interrupt");
     if (interrupt) {
       record.controlOffset = queued.offset;
       record.cancelRequestedAt = interrupt.at;
@@ -375,7 +491,12 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
       await appendEvent(dir, event);
       updateRecordFromEvent(record, event, currentItem);
       await writeJobRecord(dir, record);
-      if (event.direction === "server" && "method" in event.message && "id" in event.message && isApprovalRequest(event.message.method)) {
+      if (
+        event.direction === "server" &&
+        "method" in event.message &&
+        "id" in event.message &&
+        isApprovalRequest(event.message.method)
+      ) {
         const approvalId = String(event.message.id);
         if (!notifiedApprovals.has(approvalId)) {
           notifiedApprovals.add(approvalId);
@@ -387,25 +508,33 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
     await client.initialize();
     const projectId = await projectIdForRepo(client, record.repo);
     const threadMethod = record.threadId ? "thread/resume" : "thread/start";
-    const threadResult = await client.request(threadMethod, {
+    const threadResult = (await client.request(threadMethod, {
       ...(record.threadId ? { threadId: record.threadId } : {}),
       cwd: record.repo,
       ...(!record.threadId && projectId ? { projectId } : {}),
-    }) as { thread?: { id?: string; projectId?: string | null } };
+    })) as { thread?: { id?: string; projectId?: string | null } };
     const threadId = threadResult.thread?.id;
-    if (!threadId) throw new Error(`${threadMethod} response did not include thread.id`);
+    if (!threadId) {
+      throw new Error(`${threadMethod} response did not include thread.id`);
+    }
     record.threadId = threadId;
-    if (threadMethod === "thread/resume" && projectId && !threadResult.thread?.projectId) {
+    if (
+      threadMethod === "thread/resume" &&
+      projectId &&
+      !threadResult.thread?.projectId
+    ) {
       await client.request("thread/metadata/update", { threadId, projectId });
     }
 
-    const turnResult = await client.request("turn/start", {
+    const turnResult = (await client.request("turn/start", {
       threadId,
       cwd: record.repo,
       input: [{ type: "text", text: record.prompt }],
-    }) as { turn?: { id?: string } };
+    })) as { turn?: { id?: string } };
     const turnId = turnResult.turn?.id;
-    if (!turnId) throw new Error("turn/start response did not include turn.id");
+    if (!turnId) {
+      throw new Error("turn/start response did not include turn.id");
+    }
     record.turnId = turnId;
     await writeJobRecord(dir, record);
 
@@ -439,13 +568,23 @@ export async function runJobWorker(key: string): Promise<JobRecord> {
 }
 
 export async function notifyJob(key: string) {
-  const result = await sendJobNotification(jobDir(key), await readJob(key), "job.status");
-  if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+  const result = await sendJobNotification(
+    jobDir(key),
+    await readJob(key),
+    "job.status"
+  );
+  if (!result.ok) {
+    throw Object.assign(new Error(result.error.message), {
+      code: result.error.code,
+    });
+  }
   return result;
 }
 
 export async function readJob(key: string): Promise<JobRecord> {
-  const record = await Bun.file(`${jobDir(key)}/job.json`).json() as JobRecord;
+  const record = (await Bun.file(
+    `${jobDir(key)}/job.json`
+  ).json()) as JobRecord;
   record.progress ??= emptyProgress();
   return record;
 }
@@ -454,26 +593,48 @@ export async function readJobEvents(key: string): Promise<unknown[]> {
   return readRawEvents(`${jobDir(key)}/events.jsonl`);
 }
 
-export async function readJobSummary(key: string, eventLimit = 5): Promise<JobSummary> {
+export async function readJobSummary(
+  key: string,
+  eventLimit = 5
+): Promise<JobSummary> {
   return summarizeRecord(await readJob(key), eventLimit);
 }
 
-async function summarizeRecord(job: JobRecord, eventLimit: number): Promise<JobSummary> {
-  const ids = job.approvals.filter(approval => approval.status === "pending").map(approval => approval.id);
+async function summarizeRecord(
+  job: JobRecord,
+  eventLimit: number
+): Promise<JobSummary> {
+  const ids = job.approvals
+    .filter((approval) => approval.status === "pending")
+    .map((approval) => approval.id);
   return {
-    key: job.key, status: job.status, repo: job.repo,
-    threadId: job.threadId, turnId: job.turnId,
-    createdAt: job.createdAt, startedAt: job.startedAt, completedAt: job.completedAt,
+    key: job.key,
+    status: job.status,
+    repo: job.repo,
+    threadId: job.threadId,
+    turnId: job.turnId,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
     pendingApprovals: { count: ids.length, ids },
-    latestAgentMessage: Array.from(job.latestAgentMessage).slice(0, 2000).join(""),
-    finalResponse: job.finalResponse, error: job.error,
+    latestAgentMessage: Array.from(job.latestAgentMessage)
+      .slice(0, 2000)
+      .join(""),
+    finalResponse: job.finalResponse,
+    error: job.error,
     progress: job.progress,
     lastNotification: job.lastNotification,
-    recentEvents: await readTailEvents(`${jobDir(job.key)}/events.jsonl`, eventLimit),
+    recentEvents: await readTailEvents(
+      `${jobDir(job.key)}/events.jsonl`,
+      eventLimit
+    ),
   };
 }
 
-export async function waitForJob(key: string, options: JobWaitOptions = {}): Promise<JobWaitResult> {
+export async function waitForJob(
+  key: string,
+  options: JobWaitOptions = {}
+): Promise<JobWaitResult> {
   const eventLimit = options.eventLimit ?? 5;
   const ignoredApprovalIds = options.ignoredApprovalIds ?? [];
   const intervalMs = options.intervalMs ?? 1000;
@@ -485,13 +646,18 @@ export async function waitForJob(key: string, options: JobWaitOptions = {}): Pro
     const job = await readJob(key);
     const summary = await summarizeRecord(job, eventLimit);
     const pending = isTerminalStatus(job.status)
-      ? await readNewCompleteLines(`${jobDir(key)}/control.jsonl`, job.controlOffset)
+      ? await readNewCompleteLines(
+          `${jobDir(key)}/control.jsonl`,
+          job.controlOffset
+        )
       : { lines: [] };
-    const resumePending = pending.lines.some(line => {
+    const resumePending = pending.lines.some((line) => {
       const command = JSON.parse(line) as ControlCommand;
       return command.type === "turn.steer" && command.resume;
     });
-    const readyReason = resumePending ? null : readyReasonFor(summary, ignoredApprovalIds);
+    const readyReason = resumePending
+      ? null
+      : readyReasonFor(summary, ignoredApprovalIds);
     const now = Date.now();
     if (readyReason || (deadline !== null && now >= deadline)) {
       return {
@@ -507,7 +673,10 @@ export async function waitForJob(key: string, options: JobWaitOptions = {}): Pro
         summary,
       };
     }
-    const sleepMs = deadline === null ? intervalMs : Math.max(0, Math.min(intervalMs, deadline - now));
+    const sleepMs =
+      deadline === null
+        ? intervalMs
+        : Math.max(0, Math.min(intervalMs, deadline - now));
     await Bun.sleep(sleepMs);
   }
 }
@@ -516,7 +685,7 @@ export async function enqueueApprovalDecisionAndWait(
   key: string,
   approvalId: string,
   decision: ApprovalResolveCommand["decision"],
-  options: JobWaitOptions = {},
+  options: JobWaitOptions = {}
 ): Promise<ApprovalDecisionAndWaitResult> {
   const command = await enqueueApprovalDecision(key, approvalId, decision);
   return {
@@ -528,12 +697,20 @@ export async function enqueueApprovalDecisionAndWait(
   };
 }
 
-export async function enqueueSteer(key: string, prompt: string): Promise<TurnSteerCommand> {
+export async function enqueueSteer(
+  key: string,
+  prompt: string
+): Promise<TurnSteerCommand> {
   const dir = jobDir(key);
   const job = await readJob(key);
-  if (isTerminalStatus(job.status) && !job.threadId) throw new Error(`Job '${key}' has no threadId to resume`);
-  const pending = await readNewCompleteLines(`${dir}/control.jsonl`, job.controlOffset);
-  const resumeQueued = pending.lines.some(line => {
+  if (isTerminalStatus(job.status) && !job.threadId) {
+    throw new Error(`Job '${key}' has no threadId to resume`);
+  }
+  const pending = await readNewCompleteLines(
+    `${dir}/control.jsonl`,
+    job.controlOffset
+  );
+  const resumeQueued = pending.lines.some((line) => {
     const command = JSON.parse(line) as ControlCommand;
     return command.type === "turn.steer" && command.resume;
   });
@@ -545,38 +722,63 @@ export async function enqueueSteer(key: string, prompt: string): Promise<TurnSte
     input: [{ type: "text", text: prompt }],
   };
   await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
-  if (isTerminalStatus(job.status) && !resumeQueued) spawnDetachedWorker(key, command.id);
+  if (isTerminalStatus(job.status) && !resumeQueued) {
+    spawnDetachedWorker(key, command.id);
+  }
   return command;
 }
 
-export async function readApprovals(key: string, includeResolved = false): Promise<ApprovalRecord[]> {
+export async function readApprovals(
+  key: string,
+  includeResolved = false
+): Promise<ApprovalRecord[]> {
   const job = await readJob(key);
-  return includeResolved ? job.approvals : job.approvals.filter((approval) => approval.status === "pending");
+  return includeResolved
+    ? job.approvals
+    : job.approvals.filter((approval) => approval.status === "pending");
 }
 
-export async function readApproval(key: string, approvalId: string): Promise<ApprovalRecord> {
-  const approval = (await readApprovals(key, true)).find((candidate) => candidate.id === approvalId);
-  if (!approval) throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+export async function readApproval(
+  key: string,
+  approvalId: string
+): Promise<ApprovalRecord> {
+  const approval = (await readApprovals(key, true)).find(
+    (candidate) => candidate.id === approvalId
+  );
+  if (!approval) {
+    throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+  }
   return approval;
 }
 
 export async function enqueueApprovalDecision(
   key: string,
   approvalId: string,
-  decision: ApprovalResolveCommand["decision"],
+  decision: ApprovalResolveCommand["decision"]
 ): Promise<ApprovalResolveCommand> {
   const dir = jobDir(key);
   const job = await readJob(key);
   if (job.status !== "running") {
-    throw new Error(`Job '${key}' is ${job.status}; only running jobs can receive approval decisions`);
+    throw new Error(
+      `Job '${key}' is ${job.status}; only running jobs can receive approval decisions`
+    );
   }
-  const approval = job.approvals.find((candidate) => candidate.id === approvalId);
-  if (!approval) throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+  const approval = job.approvals.find(
+    (candidate) => candidate.id === approvalId
+  );
+  if (!approval) {
+    throw new Error(`Approval '${approvalId}' was not found for job '${key}'`);
+  }
   if (approval.status !== "pending") {
     throw new Error(`Approval '${approvalId}' is already ${approval.status}`);
   }
-  if (approval.method === "item/permissions/requestApproval" && (decision === "reject" || decision === "cancel")) {
-    throw new Error("Permission approval requests do not support reject/cancel responses in the current app-server schema");
+  if (
+    approval.method === "item/permissions/requestApproval" &&
+    (decision === "reject" || decision === "cancel")
+  ) {
+    throw new Error(
+      "Permission approval requests do not support reject/cancel responses in the current app-server schema"
+    );
   }
   const command: ApprovalResolveCommand = {
     id: crypto.randomUUID(),
@@ -593,11 +795,17 @@ async function waitForTurnCompletion(
   record: JobRecord,
   client: AppServerClient,
   dir: string,
-  processedControlIds: Set<string>,
+  processedControlIds: Set<string>
 ): Promise<void> {
   let controlOffset = record.controlOffset;
   while (record.status === "running") {
-    controlOffset = await processControlCommands(record, client, dir, processedControlIds, controlOffset);
+    controlOffset = await processControlCommands(
+      record,
+      client,
+      dir,
+      processedControlIds,
+      controlOffset
+    );
     await Bun.sleep(250);
   }
   if (record.status === "failed") {
@@ -605,8 +813,14 @@ async function waitForTurnCompletion(
   }
 }
 
-function updateRecordFromEvent(record: JobRecord, event: AppServerEvent, currentItem: { id: string | null }): void {
-  if (event.direction !== "server" || !("method" in event.message)) return;
+function updateRecordFromEvent(
+  record: JobRecord,
+  event: AppServerEvent,
+  currentItem: { id: string | null }
+): void {
+  if (event.direction !== "server" || !("method" in event.message)) {
+    return;
+  }
   const { method, params } = event.message;
   if ("id" in event.message && isApprovalRequest(method)) {
     upsertApproval(record, {
@@ -623,11 +837,15 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent, current
   }
   if (method === "thread/started") {
     const threadId = getNestedString(params, ["thread", "id"]);
-    if (threadId) record.threadId = threadId;
+    if (threadId) {
+      record.threadId = threadId;
+    }
   }
   if (method === "turn/started") {
     const turnId = getNestedString(params, ["turn", "id"]);
-    if (turnId) record.turnId = turnId;
+    if (turnId) {
+      record.turnId = turnId;
+    }
   }
   if (method === "item/started") {
     const itemType = getNestedString(params, ["item", "type"]);
@@ -637,50 +855,98 @@ function updateRecordFromEvent(record: JobRecord, event: AppServerEvent, current
       record.progress.current = {
         type: itemType,
         startedAt: event.at,
-        ...(itemType === "commandExecution" ? { command: Array.from(getNestedString(params, ["item", "command"]) ?? "").slice(0, 200).join("") } : {}),
+        ...(itemType === "commandExecution"
+          ? {
+              command: Array.from(
+                getNestedString(params, ["item", "command"]) ?? ""
+              )
+                .slice(0, 200)
+                .join(""),
+            }
+          : {}),
       };
     }
-    if (itemType === "agentMessage") record.latestAgentMessage = "";
+    if (itemType === "agentMessage") {
+      record.latestAgentMessage = "";
+    }
     if (itemType === "agentMessage" && phase === "final_answer") {
       record.finalResponse = "";
     }
   }
   if (method === "item/agentMessage/delta") {
     const delta = getNestedString(params, ["delta"]);
-    if (delta) record.latestAgentMessage += delta;
+    if (delta) {
+      record.latestAgentMessage += delta;
+    }
   }
   if (method === "item/completed") {
     const itemType = getNestedString(params, ["item", "type"]);
     const phase = getNestedString(params, ["item", "phase"]);
     const text = getNestedString(params, ["item", "text"]);
-    if (currentItem.id !== null && currentItem.id === getNestedString(params, ["item", "id"])) {
+    if (
+      currentItem.id !== null &&
+      currentItem.id === getNestedString(params, ["item", "id"])
+    ) {
       record.progress.current = null;
       currentItem.id = null;
     }
-    if (itemType === "commandExecution" && isObject(params) && isObject(params.item)) {
+    if (
+      itemType === "commandExecution" &&
+      isObject(params) &&
+      isObject(params.item)
+    ) {
       record.progress.commands.run++;
-      if ((typeof params.item.exitCode === "number" && params.item.exitCode !== 0) || params.item.status !== "completed") {
+      if (
+        (typeof params.item.exitCode === "number" &&
+          params.item.exitCode !== 0) ||
+        params.item.status !== "completed"
+      ) {
         record.progress.commands.failed++;
       }
     }
-    if (itemType === "agentMessage" && phase === "commentary" && text !== null) {
+    if (
+      itemType === "agentMessage" &&
+      phase === "commentary" &&
+      text !== null
+    ) {
       record.progress.lastCommentary = Array.from(text).slice(0, 500).join("");
     }
-    if (itemType === "agentMessage" && text !== null) record.latestAgentMessage = text;
-    if (itemType === "agentMessage" && phase === "final_answer" && text !== null) {
+    if (itemType === "agentMessage" && text !== null) {
+      record.latestAgentMessage = text;
+    }
+    if (
+      itemType === "agentMessage" &&
+      phase === "final_answer" &&
+      text !== null
+    ) {
       record.finalResponse = text;
     }
   }
-  if (method === "thread/tokenUsage/updated" && isObject(params) && isObject(params.tokenUsage) && isObject(params.tokenUsage.total)) {
+  if (
+    method === "thread/tokenUsage/updated" &&
+    isObject(params) &&
+    isObject(params.tokenUsage) &&
+    isObject(params.tokenUsage.total)
+  ) {
     const totalTokens = params.tokenUsage.total.totalTokens;
-    if (typeof totalTokens === "number") record.progress.totalTokens = totalTokens;
+    if (typeof totalTokens === "number") {
+      record.progress.totalTokens = totalTokens;
+    }
   }
   if (method === "turn/completed") {
     record.progress.current = null;
     currentItem.id = null;
     const status = getNestedString(params, ["turn", "status"]);
-    record.status = status === "failed" ? "failed" : status === "interrupted" ? "cancelled" : "completed";
-    record.error = record.status === "cancelled" ? null : getNestedString(params, ["turn", "error", "message"]);
+    record.status =
+      status === "failed"
+        ? "failed"
+        : status === "interrupted"
+          ? "cancelled"
+          : "completed";
+    record.error =
+      record.status === "cancelled"
+        ? null
+        : getNestedString(params, ["turn", "error", "message"]);
     record.completedAt = new Date().toISOString();
   }
   if (method === "error") {
@@ -695,25 +961,37 @@ async function processControlCommands(
   client: AppServerClient,
   dir: string,
   processedControlIds: Set<string>,
-  offset: number,
+  offset: number
 ): Promise<number> {
   const result = await readNewCompleteLines(`${dir}/control.jsonl`, offset);
-  if (result.lines.length === 0) return result.offset;
+  if (result.lines.length === 0) {
+    return result.offset;
+  }
   for (const line of result.lines) {
     const command = JSON.parse(line) as ControlCommand;
     record.controlOffset += Buffer.byteLength(line + "\n");
-    if (processedControlIds.has(command.id)) continue;
+    if (processedControlIds.has(command.id)) {
+      continue;
+    }
     processedControlIds.add(command.id);
     await appendEvent(dir, {
       direction: "worker",
-      event: { type: "control.accepted", commandId: command.id, commandType: command.type },
+      event: {
+        type: "control.accepted",
+        commandId: command.id,
+        commandType: command.type,
+      },
       at: new Date().toISOString(),
     });
     if (command.type === "turn.steer") {
-      if (!record.threadId || !record.turnId) {
+      if (!(record.threadId && record.turnId)) {
         await appendEvent(dir, {
           direction: "worker",
-          event: { type: "control.rejected", commandId: command.id, reason: "turn_not_started" },
+          event: {
+            type: "control.rejected",
+            commandId: command.id,
+            reason: "turn_not_started",
+          },
           at: new Date().toISOString(),
         });
         continue;
@@ -725,7 +1003,11 @@ async function processControlCommands(
       });
       await appendEvent(dir, {
         direction: "worker",
-        event: { type: "control.applied", commandId: command.id, method: "turn/steer" },
+        event: {
+          type: "control.applied",
+          commandId: command.id,
+          method: "turn/steer",
+        },
         at: new Date().toISOString(),
       });
     }
@@ -734,10 +1016,14 @@ async function processControlCommands(
       record.cancelCommandId ??= command.id;
       record.updatedAt = new Date().toISOString();
       await writeJobRecord(dir, record);
-      if (!record.threadId || !record.turnId) {
+      if (!(record.threadId && record.turnId)) {
         await appendEvent(dir, {
           direction: "worker",
-          event: { type: "control.rejected", commandId: command.id, reason: "turn_not_started" },
+          event: {
+            type: "control.rejected",
+            commandId: command.id,
+            reason: "turn_not_started",
+          },
           at: new Date().toISOString(),
         });
         continue;
@@ -748,7 +1034,11 @@ async function processControlCommands(
       });
       await appendEvent(dir, {
         direction: "worker",
-        event: { type: "control.applied", commandId: command.id, method: "turn/interrupt" },
+        event: {
+          type: "control.applied",
+          commandId: command.id,
+          method: "turn/interrupt",
+        },
         at: new Date().toISOString(),
       });
     }
@@ -764,13 +1054,20 @@ async function resolveApprovalCommand(
   record: JobRecord,
   client: AppServerClient,
   dir: string,
-  command: ApprovalResolveCommand,
+  command: ApprovalResolveCommand
 ): Promise<void> {
-  const approval = record.approvals.find((candidate) => candidate.id === command.approvalId);
+  const approval = record.approvals.find(
+    (candidate) => candidate.id === command.approvalId
+  );
   if (!approval || approval.status !== "pending") {
     await appendEvent(dir, {
       direction: "worker",
-      event: { type: "approval.rejected", commandId: command.id, approvalId: command.approvalId, reason: "not_pending" },
+      event: {
+        type: "approval.rejected",
+        commandId: command.id,
+        approvalId: command.approvalId,
+        reason: "not_pending",
+      },
       at: new Date().toISOString(),
     });
     return;
@@ -786,41 +1083,79 @@ async function resolveApprovalCommand(
     await writeJobRecord(dir, record);
     await appendEvent(dir, {
       direction: "worker",
-      event: { type: "approval.unsupported", commandId: command.id, approvalId: approval.id, method: approval.method, error: result.error },
+      event: {
+        type: "approval.unsupported",
+        commandId: command.id,
+        approvalId: approval.id,
+        method: approval.method,
+        error: result.error,
+      },
       at: new Date().toISOString(),
     });
     return;
   }
 
   await client.respond(approval.serverRequestId, result.response);
-  approval.status = command.decision === "cancel" ? "cancelled" : command.decision.startsWith("approve") ? "approved" : "rejected";
+  approval.status =
+    command.decision === "cancel"
+      ? "cancelled"
+      : command.decision.startsWith("approve")
+        ? "approved"
+        : "rejected";
   approval.decision = command.decision;
   approval.resolvedAt = new Date().toISOString();
   record.updatedAt = new Date().toISOString();
   await writeJobRecord(dir, record);
   await appendEvent(dir, {
     direction: "worker",
-    event: { type: "approval.resolved", commandId: command.id, approvalId: approval.id, decision: command.decision },
+    event: {
+      type: "approval.resolved",
+      commandId: command.id,
+      approvalId: approval.id,
+      decision: command.decision,
+    },
     at: new Date().toISOString(),
   });
 }
 
 export function approvalResponseFor(
   approval: ApprovalRecord,
-  decision: ApprovalResolveCommand["decision"],
-): { supported: true; response: unknown } | { supported: false; error: string } {
-  if (approval.method === "item/commandExecution/requestApproval" || approval.method === "item/fileChange/requestApproval") {
-    return { supported: true, response: { decision: modernApprovalDecision(approval, decision) } };
+  decision: ApprovalResolveCommand["decision"]
+):
+  | { supported: true; response: unknown }
+  | { supported: false; error: string } {
+  if (
+    approval.method === "item/commandExecution/requestApproval" ||
+    approval.method === "item/fileChange/requestApproval"
+  ) {
+    return {
+      supported: true,
+      response: { decision: modernApprovalDecision(approval, decision) },
+    };
   }
-  if (approval.method === "execCommandApproval" || approval.method === "applyPatchApproval") {
-    return { supported: true, response: { decision: legacyApprovalDecision(decision) } };
+  if (
+    approval.method === "execCommandApproval" ||
+    approval.method === "applyPatchApproval"
+  ) {
+    return {
+      supported: true,
+      response: { decision: legacyApprovalDecision(decision) },
+    };
   }
   if (approval.method === "item/permissions/requestApproval") {
     if (decision === "reject" || decision === "cancel") {
-      return { supported: false, error: "Permission approval requests only support approve or approveForSession responses" };
+      return {
+        supported: false,
+        error:
+          "Permission approval requests only support approve or approveForSession responses",
+      };
     }
-    if (!isObject(approval.params) || !isObject(approval.params.permissions)) {
-      return { supported: false, error: "Permission approval request params did not include a permissions object" };
+    if (!(isObject(approval.params) && isObject(approval.params.permissions))) {
+      return {
+        supported: false,
+        error:
+          "Permission approval request params did not include a permissions object",
+      };
     }
     return {
       supported: true,
@@ -830,35 +1165,64 @@ export function approvalResponseFor(
       },
     };
   }
-  return { supported: false, error: `Approval method '${approval.method}' is not supported yet` };
+  return {
+    supported: false,
+    error: `Approval method '${approval.method}' is not supported yet`,
+  };
 }
 
-function modernApprovalDecision(approval: ApprovalRecord, decision: ApprovalResolveCommand["decision"]): unknown {
-  if (decision === "approve") return "accept";
-  if (decision === "approveForSession") return sessionApprovalDecision(approval.params) ?? "acceptForSession";
-  if (decision === "cancel") return "cancel";
+function modernApprovalDecision(
+  approval: ApprovalRecord,
+  decision: ApprovalResolveCommand["decision"]
+): unknown {
+  if (decision === "approve") {
+    return "accept";
+  }
+  if (decision === "approveForSession") {
+    return sessionApprovalDecision(approval.params) ?? "acceptForSession";
+  }
+  if (decision === "cancel") {
+    return "cancel";
+  }
   return "decline";
 }
 
 function sessionApprovalDecision(params: unknown): unknown | null {
-  if (!isObject(params)) return null;
+  if (!isObject(params)) {
+    return null;
+  }
   const { availableDecisions } = params;
   if (Array.isArray(availableDecisions)) {
-    const sessionDecision = availableDecisions.find((candidate) => isObject(candidate) && "acceptWithExecpolicyAmendment" in candidate);
-    if (sessionDecision) return sessionDecision;
+    const sessionDecision = availableDecisions.find(
+      (candidate) =>
+        isObject(candidate) && "acceptWithExecpolicyAmendment" in candidate
+    );
+    if (sessionDecision) {
+      return sessionDecision;
+    }
   }
   return null;
 }
 
-function legacyApprovalDecision(decision: ApprovalResolveCommand["decision"]): unknown {
-  if (decision === "approve") return "approved";
-  if (decision === "approveForSession") return "approved_for_session";
-  if (decision === "cancel") return "abort";
+function legacyApprovalDecision(
+  decision: ApprovalResolveCommand["decision"]
+): unknown {
+  if (decision === "approve") {
+    return "approved";
+  }
+  if (decision === "approveForSession") {
+    return "approved_for_session";
+  }
+  if (decision === "cancel") {
+    return "abort";
+  }
   return { denied: { rejection: "Rejected via codexctl" } };
 }
 
 function upsertApproval(record: JobRecord, approval: ApprovalRecord): void {
-  const index = record.approvals.findIndex((candidate) => candidate.id === approval.id);
+  const index = record.approvals.findIndex(
+    (candidate) => candidate.id === approval.id
+  );
   if (index >= 0) {
     record.approvals[index] = { ...record.approvals[index], ...approval };
   } else {
@@ -869,7 +1233,9 @@ function upsertApproval(record: JobRecord, approval: ApprovalRecord): void {
 function getNestedString(value: unknown, path: string[]): string | null {
   let current = value;
   for (const key of path) {
-    if (!isObject(current)) return null;
+    if (!isObject(current)) {
+      return null;
+    }
     current = current[key];
   }
   return typeof current === "string" ? current : null;
@@ -891,8 +1257,11 @@ function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
 }
 
 function summarizeJob(job: JobRecord): JobListItem {
-  const pendingApprovals = job.approvals.filter((approval) => approval.status === "pending");
-  const canResolveApprovals = job.status === "running" && !job.cancelRequestedAt;
+  const pendingApprovals = job.approvals.filter(
+    (approval) => approval.status === "pending"
+  );
+  const canResolveApprovals =
+    job.status === "running" && !job.cancelRequestedAt;
   const actionableApprovals = canResolveApprovals ? pendingApprovals : [];
   return {
     key: job.key,
@@ -911,18 +1280,31 @@ function summarizeJob(job: JobRecord): JobListItem {
   };
 }
 
-function isTerminalStatus(status: JobStatus | "unreadable"): status is "completed" | "failed" | "cancelled" {
-  return status === "completed" || status === "failed" || status === "cancelled";
+function isTerminalStatus(
+  status: JobStatus | "unreadable"
+): status is "completed" | "failed" | "cancelled" {
+  return (
+    status === "completed" || status === "failed" || status === "cancelled"
+  );
 }
 
-function readyReasonFor(summary: JobSummary, ignoredApprovalIds: string[]): JobWaitResult["reason"] | null {
+function readyReasonFor(
+  summary: JobSummary,
+  ignoredApprovalIds: string[]
+): JobWaitResult["reason"] | null {
   if (
-    summary.status === "running"
-    && summary.pendingApprovals.ids.some(id => !ignoredApprovalIds.includes(id))
+    summary.status === "running" &&
+    summary.pendingApprovals.ids.some((id) => !ignoredApprovalIds.includes(id))
   ) {
     return "approval_required";
   }
-  if (summary.status === "completed" || summary.status === "failed" || summary.status === "cancelled") return "terminal";
+  if (
+    summary.status === "completed" ||
+    summary.status === "failed" ||
+    summary.status === "cancelled"
+  ) {
+    return "terminal";
+  }
   return null;
 }
 
@@ -930,13 +1312,17 @@ async function readJobRootEntries(root: string) {
   try {
     return await readdir(root, { withFileTypes: true });
   } catch (error) {
-    if (isErrorWithCode(error) && error.code === "ENOENT") return [];
+    if (isErrorWithCode(error) && error.code === "ENOENT") {
+      return [];
+    }
     throw error;
   }
 }
 
 function isProcessAlive(pid: number | null): boolean {
-  if (pid === null) return false;
+  if (pid === null) {
+    return false;
+  }
   try {
     process.kill(pid, 0);
     return true;

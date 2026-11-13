@@ -1,7 +1,12 @@
 import { appendEvent } from "./events.ts";
 import type { JobRecord } from "./job.ts";
 
-export type NotifyEvent = "job.completed" | "job.failed" | "job.cancelled" | "approval.requested" | "job.status";
+export type NotifyEvent =
+  | "job.completed"
+  | "job.failed"
+  | "job.cancelled"
+  | "approval.requested"
+  | "job.status";
 export type NotifyResult =
   | { ok: true }
   | { ok: false; error: { code: string; message: string } };
@@ -11,13 +16,22 @@ export async function sendJobNotification(
   job: JobRecord,
   event: NotifyEvent,
   approvalId?: string,
-  onRecorded?: (notification: NonNullable<JobRecord["lastNotification"]>) => Promise<void>,
+  onRecorded?: (
+    notification: NonNullable<JobRecord["lastNotification"]>
+  ) => Promise<void>
 ): Promise<NotifyResult> {
-  const recordNotification = async (status: NonNullable<JobRecord["lastNotification"]>["status"], details = {}) => {
+  const recordNotification = async (
+    status: NonNullable<JobRecord["lastNotification"]>["status"],
+    details = {}
+  ) => {
     const at = new Date().toISOString();
     // Notification/audit I/O must never turn a successful job into a failed job.
     try {
-      await appendEvent(dir, { direction: "worker", event: { type: `notify.${status}`, ...details }, at });
+      await appendEvent(dir, {
+        direction: "worker",
+        event: { type: `notify.${status}`, ...details },
+        at,
+      });
       await onRecorded?.({ status, at });
     } catch {}
   };
@@ -26,11 +40,22 @@ export async function sendJobNotification(
     if (event !== "job.status") {
       await recordNotification("skipped", { reason: "not_configured" });
     }
-    return { ok: false, error: { code: "notify_not_configured", message: "CODEXCTL_GROK_BOT_NOTIFY_URL is not configured" } };
+    return {
+      ok: false,
+      error: {
+        code: "notify_not_configured",
+        message: "CODEXCTL_GROK_BOT_NOTIFY_URL is not configured",
+      },
+    };
   }
   const key = process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY;
   // Never include the notification credentials in model-generated text.
-  const redact = (text: string) => [url, key].reduce<string>((value, secret) => secret ? value.replaceAll(secret, "[REDACTED]") : value, text);
+  const redact = (text: string) =>
+    [url, key].reduce<string>(
+      (value, secret) =>
+        secret ? value.replaceAll(secret, "[REDACTED]") : value,
+      text
+    );
   const payload = {
     source: "codexctl",
     event,
@@ -41,28 +66,49 @@ export async function sendJobNotification(
     turnId: job.turnId === null ? null : redact(job.turnId),
     at: new Date().toISOString(),
     ...(approvalId === undefined ? {} : { approvalId: redact(approvalId) }),
-    finalResponse: Array.from(redact(job.finalResponse)).slice(0, 2000).join(""),
+    finalResponse: Array.from(redact(job.finalResponse))
+      .slice(0, 2000)
+      .join(""),
   };
   let failure: { httpStatus: number } | { errorType: string } | undefined;
   try {
-    if (!key) {
-      failure = { errorType: "missing_key" };
-    } else {
+    if (key) {
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(10_000),
         redirect: "manual",
       });
-      if (response.status !== 200) failure = { httpStatus: response.status };
+      if (response.status !== 200) {
+        failure = { httpStatus: response.status };
+      }
       await response.body?.cancel();
+    } else {
+      failure = { errorType: "missing_key" };
     }
   } catch (error) {
-    failure = { errorType: error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request_error" };
+    failure = {
+      errorType:
+        error instanceof Error && error.name === "TimeoutError"
+          ? "timeout"
+          : "request_error",
+    };
   }
   await recordNotification(failure ? "failed" : "sent", failure);
   return failure
-    ? { ok: false, error: { code: "notify_failed", message: "httpStatus" in failure ? `HTTP ${failure.httpStatus}` : failure.errorType } }
+    ? {
+        ok: false,
+        error: {
+          code: "notify_failed",
+          message:
+            "httpStatus" in failure
+              ? `HTTP ${failure.httpStatus}`
+              : failure.errorType,
+        },
+      }
     : { ok: true };
 }

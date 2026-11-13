@@ -26,7 +26,7 @@ class CliError extends Error {
   constructor(
     readonly code: "usage_error" | "invalid_flag",
     message: string,
-    readonly exitCode = 2,
+    readonly exitCode = 2
   ) {
     super(message);
   }
@@ -63,12 +63,14 @@ async function main(argv: string[]): Promise<void> {
 
   if (resource === "job" && action === "run") {
     allowFlags(args, ["key", "repo", "prompt", "force"]);
-    await printJson(await runJob({
-      key: requiredString(args, "key"),
-      repo: stringFlag(args, "repo") ?? ".",
-      prompt: requiredString(args, "prompt"),
-      force: booleanFlag(args, "force"),
-    }));
+    await printJson(
+      await runJob({
+        key: requiredString(args, "key"),
+        repo: stringFlag(args, "repo") ?? ".",
+        prompt: requiredString(args, "prompt"),
+        force: booleanFlag(args, "force"),
+      })
+    );
     return;
   }
 
@@ -94,11 +96,13 @@ async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "wait" && key) {
     requirePositionalCount(args, 3);
     allowFlags(args, ["events", "interval-ms", "timeout-ms"]);
-    await printJson(await waitForJob(key, {
-      eventLimit: eventLimitFlag(args),
-      intervalMs: intervalMsFlag(args),
-      timeoutMs: numberFlag(args, "timeout-ms"),
-    }));
+    await printJson(
+      await waitForJob(key, {
+        eventLimit: eventLimitFlag(args),
+        intervalMs: intervalMsFlag(args),
+        timeoutMs: numberFlag(args, "timeout-ms"),
+      })
+    );
     return;
   }
 
@@ -126,7 +130,12 @@ async function main(argv: string[]): Promise<void> {
   if (resource === "job" && action === "rm" && key) {
     requirePositionalCount(args, 3);
     allowFlags(args, ["force", "dry-run"]);
-    await printJson(await removeJob(key, { force: booleanFlag(args, "force"), dryRun: booleanFlag(args, "dry-run") }));
+    await printJson(
+      await removeJob(key, {
+        force: booleanFlag(args, "force"),
+        dryRun: booleanFlag(args, "dry-run"),
+      })
+    );
     return;
   }
 
@@ -143,11 +152,21 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (resource === "approval" && action === "approve" && key && extra) {
-    allowFlags(args, ["for-session", "wait", "events", "interval-ms", "timeout-ms"]);
-    const decision = booleanFlag(args, "for-session") ? "approveForSession" : "approve";
+    allowFlags(args, [
+      "for-session",
+      "wait",
+      "events",
+      "interval-ms",
+      "timeout-ms",
+    ]);
+    const decision = booleanFlag(args, "for-session")
+      ? "approveForSession"
+      : "approve";
     if (booleanFlag(args, "wait")) {
       const waitOptions = waitOptionsFromFlags(args);
-      await printJson(await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions));
+      await printJson(
+        await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions)
+      );
     } else {
       await printJson(await enqueueApprovalDecision(key, extra, decision));
     }
@@ -159,7 +178,9 @@ async function main(argv: string[]): Promise<void> {
     const decision = booleanFlag(args, "cancel") ? "cancel" : "reject";
     if (booleanFlag(args, "wait")) {
       const waitOptions = waitOptionsFromFlags(args);
-      await printJson(await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions));
+      await printJson(
+        await enqueueApprovalDecisionAndWait(key, extra, decision, waitOptions)
+      );
     } else {
       await printJson(await enqueueApprovalDecision(key, extra, decision));
     }
@@ -180,7 +201,9 @@ export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | boolean>();
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
-    if (!arg) continue;
+    if (!arg) {
+      continue;
+    }
     if (!arg.startsWith("--")) {
       positionals.push(arg);
       continue;
@@ -189,8 +212,12 @@ export function parseArgs(argv: string[]): Args {
     const equalsIndex = flag.indexOf("=");
     const name = equalsIndex >= 0 ? flag.slice(0, equalsIndex) : flag;
     // Output is always JSON. --json is accepted and ignored so callers written against older releases keep working.
-    if (name === "json") continue;
-    if (!name) throw new CliError("invalid_flag", "Flag name cannot be empty");
+    if (name === "json") {
+      continue;
+    }
+    if (!name) {
+      throw new CliError("invalid_flag", "Flag name cannot be empty");
+    }
     if (equalsIndex >= 0) {
       flags.set(name, flag.slice(equalsIndex + 1));
       continue;
@@ -240,8 +267,12 @@ function requirePositionalCount(args: Args, count: number): void {
 
 function eventFormatFlag(args: Args): "raw" {
   const value = stringFlag(args, "format");
-  if (value === null) return "raw";
-  if (value === "raw") return value;
+  if (value === null) {
+    return "raw";
+  }
+  if (value === "raw") {
+    return value;
+  }
   throw new CliError("invalid_flag", "--format must be raw");
 }
 
@@ -253,7 +284,11 @@ function eventLimitFlag(args: Args): number {
   return nonNegativeIntegerFlag(args, "events", 5);
 }
 
-function waitOptionsFromFlags(args: Args): { eventLimit: number; intervalMs: number; timeoutMs: number | null } {
+function waitOptionsFromFlags(args: Args): {
+  eventLimit: number;
+  intervalMs: number;
+  timeoutMs: number | null;
+} {
   return {
     eventLimit: eventLimitFlag(args),
     intervalMs: intervalMsFlag(args),
@@ -261,25 +296,42 @@ function waitOptionsFromFlags(args: Args): { eventLimit: number; intervalMs: num
   };
 }
 
-function nonNegativeIntegerFlag(args: Args, name: string, fallback: number): number {
+function nonNegativeIntegerFlag(
+  args: Args,
+  name: string,
+  fallback: number
+): number {
   const value = args.flags.get(name);
-  if (value === undefined) return fallback;
+  if (value === undefined) {
+    return fallback;
+  }
   if (typeof value !== "string") {
-    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
+    throw new CliError(
+      "invalid_flag",
+      `--${name} must be a non-negative integer`
+    );
   }
   if (value.trim().length === 0) {
-    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
+    throw new CliError(
+      "invalid_flag",
+      `--${name} must be a non-negative integer`
+    );
   }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new CliError("invalid_flag", `--${name} must be a non-negative integer`);
+    throw new CliError(
+      "invalid_flag",
+      `--${name} must be a non-negative integer`
+    );
   }
   return parsed;
 }
 
 function numberFlag(args: Args, name: string): number | null {
   const value = args.flags.get(name);
-  if (value === undefined) return null;
+  if (value === undefined) {
+    return null;
+  }
   if (typeof value !== "string") {
     throw new CliError("invalid_flag", `--${name} must be a positive integer`);
   }
@@ -332,29 +384,48 @@ if (import.meta.main) {
   main(Bun.argv.slice(2)).catch(async (error) => {
     const exitCode = errorExitCode(error);
     const message = error instanceof Error ? error.message : String(error);
-    await Bun.write(Bun.stderr, JSON.stringify({
-      ok: false,
-      error: { code: errorCode(error), message },
-    }, null, 2) + "\n");
+    await Bun.write(
+      Bun.stderr,
+      JSON.stringify(
+        {
+          ok: false,
+          error: { code: errorCode(error), message },
+        },
+        null,
+        2
+      ) + "\n"
+    );
     process.exit(exitCode);
   });
 }
 
 function errorCode(error: unknown): string {
-  if (error instanceof CliError) return error.code;
-  if (isCodedError(error)) return error.code;
+  if (error instanceof CliError) {
+    return error.code;
+  }
+  if (isCodedError(error)) {
+    return error.code;
+  }
   return "internal_error";
 }
 
 function errorExitCode(error: unknown): number {
-  if (error instanceof CliError) return error.exitCode;
-  if (isCodedError(error)) return error.exitCode ?? 2;
+  if (error instanceof CliError) {
+    return error.exitCode;
+  }
+  if (isCodedError(error)) {
+    return error.exitCode ?? 2;
+  }
   return 1;
 }
 
-function isCodedError(error: unknown): error is { code: string; exitCode?: number } {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string";
+function isCodedError(
+  error: unknown
+): error is { code: string; exitCode?: number } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+  );
 }
