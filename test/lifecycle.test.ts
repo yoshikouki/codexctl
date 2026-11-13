@@ -79,7 +79,7 @@ for await (const line of console) {
     }, 20);
   }
   if (m.method === "turn/steer") {
-    const text = m.params!.input![0]!.text;
+    const text = m.params.input[0].text;
     if (text.startsWith("test-events:")) {
       const batch = JSON.parse(text.slice("test-events:".length));
       for (const event of batch.events) send(event);
