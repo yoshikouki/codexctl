@@ -207,7 +207,7 @@ describe("cli output contract", () => {
 describe("raw job events", () => {
   test("job events can be emitted as raw JSONL", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "raw-events", repo: ".", prompt: "hello" });
@@ -253,7 +253,7 @@ describe("raw job events", () => {
 
   test("job summary returns final response, approvals, and recent raw events", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "summary-test", repo: ".", prompt: "hello" });
@@ -407,7 +407,7 @@ describe("raw job events", () => {
 
   test("job wait returns when approval is required", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "approval-wait", repo: ".", prompt: "hello" });
@@ -446,7 +446,7 @@ describe("raw job events", () => {
 
   test("job wait returns the current summary on timeout", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "timeout-wait", repo: ".", prompt: "hello" });
@@ -599,7 +599,7 @@ describe("event store", () => {
 
   test("enqueueApprovalDecision appends an approval resolve command", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "approval-test", repo: ".", prompt: "hello" });
@@ -636,7 +636,7 @@ describe("event store", () => {
 
   test("approval wait ignores the approval it just enqueued", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({
@@ -730,7 +730,7 @@ describe("event store", () => {
 
   test("approval wait validates wait flags before enqueueing", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({
@@ -785,7 +785,7 @@ describe("event store", () => {
 
   test("enqueueApprovalDecision rejects unsupported permission denials", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({
@@ -827,13 +827,13 @@ describe("event store", () => {
 
   test("readNewCompleteLines consumes only complete lines using byte offsets", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "tail-test", repo: ".", prompt: "hello" });
       const path = ".codexctl/jobs/tail-test/events.jsonl";
-      const first = JSON.stringify({ message: "English 😀" }) + "\n";
-      const second = JSON.stringify({ message: "next" }) + "\n";
+      const first = `${JSON.stringify({ message: "English 😀" })}\n`;
+      const second = `${JSON.stringify({ message: "next" })}\n`;
       await Bun.write(path, first + second.slice(0, -1));
       const firstRead = await readNewCompleteLines(path, 0);
       expect(firstRead.lines).toEqual([first.trimEnd()]);
@@ -853,7 +853,7 @@ describe("event store", () => {
 
   test("removeJob removes terminal jobs and refuses active live workers", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "remove-terminal", repo: ".", prompt: "hello" });
@@ -906,7 +906,7 @@ describe("event store", () => {
 describe("job control files", () => {
   test("createJob initializes control and event logs", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "control-test", repo: ".", prompt: "hello" });
@@ -944,7 +944,7 @@ describe("job control files", () => {
 
   test("createJob force refuses to replace live workers", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "live-force-test", repo: ".", prompt: "hello" });
@@ -991,7 +991,7 @@ describe("job control files", () => {
 
   test("enqueueSteer appends a control command for running jobs", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "steer-test", repo: ".", prompt: "hello" });
@@ -1025,7 +1025,7 @@ describe("job control files", () => {
 
   test("listJobs summarizes jobs", async () => {
     const cwd = process.cwd();
-    const tmp = await mkdtemp(join(import.meta.dir, "tmp-"));
+    const tmp = await mkdtemp("/tmp/codexctl-args-");
     try {
       process.chdir(tmp);
       await createJob({ key: "completed-job", repo: ".", prompt: "hello" });
@@ -1085,5 +1085,29 @@ describe("job key contract", () => {
   test("rejects traversal and empty keys", () => {
     expect(() => assertJobKey("../oops")).toThrow();
     expect(() => assertJobKey("")).toThrow();
+  });
+});
+
+test("job errors preserve filesystem causes without changing their codes", async () => {
+  process.env.CODEXCTL_HOME = join(testHome, "state");
+  const options = { key: "error-causes", repo: testHome, prompt: "fixture" };
+  const record = await createJob(options);
+  await expect(createJob(options)).rejects.toMatchObject({
+    cause: { code: "EEXIST" },
+  });
+  record.workerPid = process.pid;
+  await Bun.write(
+    join(jobsRoot(), record.key, "job.json"),
+    JSON.stringify(record)
+  );
+  await expect(createJob({ ...options, force: true })).rejects.toMatchObject({
+    code: "job_worker_alive",
+    exitCode: 2,
+    cause: { code: "EEXIST" },
+  });
+  await expect(removeJob("missing-error-causes")).rejects.toMatchObject({
+    code: "job_unreadable",
+    exitCode: 2,
+    cause: { code: "ENOENT" },
   });
 });

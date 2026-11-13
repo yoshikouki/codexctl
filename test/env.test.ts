@@ -33,8 +33,9 @@ test("default path loads without config.toml; quotes, comments and blanks are su
   expect(process.env.CODEXCTL_ENV_EMPTY).toBe("");
 });
 
-for (const path of ["custom.env", "~/custom.env", "absolute"]) {
-  test(`env_file overrides the default: ${path}`, async () => {
+test.each(["custom.env", "~/custom.env", "absolute"])(
+  "env_file overrides the default: %s",
+  async (path) => {
     const target =
       path === "custom.env" ? join(configDir, path) : join(home, "custom.env");
     await Bun.write(
@@ -45,13 +46,14 @@ for (const path of ["custom.env", "~/custom.env", "absolute"]) {
     await Bun.write(target, "CODEXCTL_ENV_TEST=custom\n");
     await loadEnvFile();
     expect(process.env.CODEXCTL_ENV_TEST).toBe("custom");
-  });
-}
+  }
+);
 
 test("existing environment values, including empty strings, win", async () => {
   await Bun.write(join(configDir, "env"), "CODEXCTL_ENV_TEST=file\n");
   for (const value of ["caller", ""]) {
     process.env.CODEXCTL_ENV_TEST = value;
+    // biome-ignore lint/performance/noAwaitInLoops: Each case replaces process.env before loading it; concurrent loads would share the same variable.
     await loadEnvFile();
     expect(process.env.CODEXCTL_ENV_TEST).toBe(value);
   }
@@ -94,14 +96,14 @@ test("invalid TOML reports its path without exposing values, even for help", asy
   const path = join(configDir, "config.toml");
   await Bun.write(path, "# config\nenv_file = !private-value\n");
   await cliError(path, "Invalid TOML");
+  await expect(loadEnvFile()).rejects.toMatchObject({
+    cause: expect.any(Error),
+  });
 });
 
-for (const config of [
-  'unknown = "private-value"',
-  "env_file = 42",
-  'env_file = ""',
-]) {
-  test(`rejects unsupported config: ${config.split("=")[0]!.trim()}`, async () => {
+test.each(['unknown = "private-value"', "env_file = 42", 'env_file = ""'])(
+  "rejects unsupported config: %s",
+  async (config) => {
     const path = join(configDir, "config.toml");
     await Bun.write(path, config);
     await cliError(
@@ -110,33 +112,47 @@ for (const config of [
         ? "Unknown config key; only env_file is supported"
         : "env_file must be a non-empty path string"
     );
-  });
-}
+  }
+);
 
-for (const line of [
+test.each([
   "export CODEXCTL_ENV_TEST=private-value",
   "private-value",
   "CODEXCTL_ENV_TEST='private-value",
   'CODEXCTL_ENV_TEST="private-value\ncontinued"',
-]) {
-  test("malformed env lines report line numbers without values", async () => {
-    const path = join(configDir, "env");
-    await Bun.write(path, `# comment\n${line}\n`);
-    await cliError(
-      path,
-      line.startsWith("CODEXCTL_ENV_TEST=")
-        ? "Invalid quoted value; multiline values are not supported"
-        : "Expected KEY=VALUE",
-      2
-    );
-  });
-}
+])("malformed env lines report line numbers without values", async (line) => {
+  const path = join(configDir, "env");
+  await Bun.write(path, `# comment\n${line}\n`);
+  await cliError(
+    path,
+    line.startsWith("CODEXCTL_ENV_TEST=")
+      ? "Invalid quoted value; multiline values are not supported"
+      : "Expected KEY=VALUE",
+    2
+  );
+});
 
-for (const file of ["config.toml", "env"]) {
-  test(`unreadable ${file} returns a safe error`, async () => {
+test.each(["config.toml", "env"])(
+  "unreadable %s returns a safe error",
+  async (file) => {
     // A directory reliably fails reads, including when tests run as root.
     const path = join(configDir, file);
     await mkdir(path);
     await cliError(path, "Cannot read file");
-  });
-}
+    await expect(loadEnvFile()).rejects.toMatchObject({
+      cause: { code: "EISDIR" },
+    });
+  }
+);
+
+test("env parsing preserves CRLF, whitespace, empty values and equals in values", async () => {
+  await Bun.write(join(configDir, "env"), "  CODEXCTL_ENV_TEST =invalid\r\n");
+  await expect(loadEnvFile()).rejects.toThrow("Expected KEY=VALUE");
+  await Bun.write(
+    join(configDir, "env"),
+    "  CODEXCTL_ENV_TEST= a=b 😀  \r\nCODEXCTL_ENV_EMPTY=\r\n# ignored\r\n"
+  );
+  await loadEnvFile();
+  expect(process.env.CODEXCTL_ENV_TEST).toBe("a=b 😀");
+  expect(process.env.CODEXCTL_ENV_EMPTY).toBe("");
+});

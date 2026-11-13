@@ -39,6 +39,7 @@ export async function readTailEvents(
   while (offset > 0) {
     const start = Math.max(0, offset - 64 * 1024);
     tail = Buffer.concat([
+      // biome-ignore lint/performance/noAwaitInLoops: Read earlier chunks only until the requested tail is complete; each chunk depends on the current offset.
       Buffer.from(await file.slice(start, offset).arrayBuffer()),
       tail,
     ]);
@@ -59,7 +60,7 @@ export async function appendEvent(
   dir: string,
   event: AppServerEvent
 ): Promise<void> {
-  await appendFile(`${dir}/events.jsonl`, JSON.stringify(event) + "\n");
+  await appendFile(`${dir}/events.jsonl`, `${JSON.stringify(event)}\n`);
 }
 
 export async function readNewCompleteLines(
@@ -70,23 +71,21 @@ export async function readNewCompleteLines(
   if (!(await file.exists())) {
     return { lines: [], offset };
   }
-  const size = file.size;
-  if (offset > size) {
-    offset = 0;
-  }
-  if (offset === size) {
-    return { lines: [], offset };
+  const { size } = file;
+  const start = offset > size ? 0 : offset;
+  if (start === size) {
+    return { lines: [], offset: start };
   }
 
-  const chunk = await file.slice(offset, size).text();
+  const chunk = await file.slice(start, size).text();
   const lastNewline = chunk.lastIndexOf("\n");
   if (lastNewline < 0) {
-    return { lines: [], offset };
+    return { lines: [], offset: start };
   }
 
   const consumed = chunk.slice(0, lastNewline + 1);
   return {
     lines: consumed.split("\n").filter((line) => line.trim().length > 0),
-    offset: offset + new TextEncoder().encode(consumed).byteLength,
+    offset: start + new TextEncoder().encode(consumed).byteLength,
   };
 }

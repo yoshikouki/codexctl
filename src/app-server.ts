@@ -2,18 +2,18 @@ import type { ReadableStreamDefaultReader as NodeReadableStreamDefaultReader } f
 
 type JsonObject = Record<string, unknown>;
 
-type JsonRpcRequest = {
+interface JsonRpcRequest {
   id: number;
   method: string;
   params?: unknown;
-};
+}
 
-type JsonRpcNotification = {
+interface JsonRpcNotification {
   method: string;
   params?: unknown;
-};
+}
 
-type JsonRpcResponse = {
+interface JsonRpcResponse {
   id: number;
   result?: unknown;
   error?: {
@@ -21,9 +21,9 @@ type JsonRpcResponse = {
     message: string;
     data?: unknown;
   };
-};
+}
 
-type JsonRpcClientResponse = {
+interface JsonRpcClientResponse {
   id: string | number;
   result?: unknown;
   error?: {
@@ -31,13 +31,13 @@ type JsonRpcClientResponse = {
     message: string;
     data?: unknown;
   };
-};
+}
 
-type JsonRpcServerRequest = {
+interface JsonRpcServerRequest {
   id: string | number;
   method: string;
   params?: unknown;
-};
+}
 
 export type AppServerEvent =
   | {
@@ -53,20 +53,20 @@ export type AppServerEvent =
   | { direction: "worker"; event: JsonObject; at: string }
   | { direction: "control"; command: JsonObject; at: string };
 
-type PendingRequest = {
+interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
-};
+}
 
 export class AppServerClient {
-  #proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  #stderr: Promise<string>;
+  readonly #proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  readonly #stderr: Promise<string>;
   #nextId = 1;
-  #pending = new Map<number, PendingRequest>();
+  readonly #pending = new Map<number, PendingRequest>();
   #buffer = "";
-  #events: AppServerEvent[] = [];
-  #onEvent?: (event: AppServerEvent) => Promise<void> | void;
-  #readLoopDone: Promise<void>;
+  readonly #events: AppServerEvent[] = [];
+  readonly #onEvent?: (event: AppServerEvent) => Promise<void> | void;
+  readonly #readLoopDone: Promise<void>;
 
   constructor(onEvent?: (event: AppServerEvent) => Promise<void> | void) {
     this.#proc = Bun.spawn(["codex", "app-server", "--stdio"], {
@@ -105,7 +105,8 @@ export class AppServerClient {
   }
 
   async request(method: string, params?: unknown): Promise<unknown> {
-    const id = this.#nextId++;
+    const id = this.#nextId;
+    this.#nextId += 1;
     const message: JsonRpcRequest =
       params === undefined ? { id, method } : { id, method, params };
     await this.#emit({
@@ -117,7 +118,7 @@ export class AppServerClient {
       this.#pending.set(id, { resolve, reject });
     });
     try {
-      this.#proc.stdin.write(JSON.stringify(message) + "\n");
+      this.#proc.stdin.write(`${JSON.stringify(message)}\n`);
     } catch (error) {
       this.#pending.delete(id);
       throw error;
@@ -133,7 +134,7 @@ export class AppServerClient {
       message,
       at: new Date().toISOString(),
     });
-    this.#proc.stdin.write(JSON.stringify(message) + "\n");
+    this.#proc.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   async respond(id: string | number, result: unknown): Promise<void> {
@@ -143,7 +144,7 @@ export class AppServerClient {
       message,
       at: new Date().toISOString(),
     });
-    this.#proc.stdin.write(JSON.stringify(message) + "\n");
+    this.#proc.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   async close(): Promise<void> {
@@ -161,13 +162,12 @@ export class AppServerClient {
   ): Promise<void> {
     const decoder = new TextDecoder();
     try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          break;
-        }
+      let chunk = await reader.read();
+      while (!chunk.done) {
         this.#buffer += decoder.decode(chunk.value, { stream: true });
+        // biome-ignore lint/performance/noAwaitInLoops: Read stream chunks and emit JSON-RPC events in wire order; later events depend on earlier responses.
         await this.#drainLines();
+        chunk = await reader.read();
       }
       this.#rejectAll(new Error("codex app-server stdout closed"));
     } catch (error) {
@@ -179,11 +179,8 @@ export class AppServerClient {
   }
 
   async #drainLines(): Promise<void> {
-    while (true) {
+    while (this.#buffer.includes("\n")) {
       const newline = this.#buffer.indexOf("\n");
-      if (newline < 0) {
-        return;
-      }
       const line = this.#buffer.slice(0, newline).trim();
       this.#buffer = this.#buffer.slice(newline + 1);
       if (line.length === 0) {
@@ -197,9 +194,11 @@ export class AppServerClient {
           | JsonRpcServerRequest;
       } catch (error) {
         throw new Error(
-          `Failed to parse app-server JSON-RPC line: ${error instanceof Error ? error.message : String(error)}`
+          `Failed to parse app-server JSON-RPC line: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error }
         );
       }
+      // biome-ignore lint/performance/noAwaitInLoops: Read stream chunks and emit JSON-RPC events in wire order; later events depend on earlier responses.
       await this.#emit({
         direction: "server",
         message,
@@ -239,8 +238,10 @@ export class AppServerClient {
   }
 }
 
+const JOB_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
 export function assertJobKey(key: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(key) || key.includes("..")) {
+  if (!JOB_KEY.test(key) || key.includes("..")) {
     throw new Error(
       "Job key must be 1-128 chars of letters, numbers, dot, underscore, or dash; it cannot contain '..'"
     );
