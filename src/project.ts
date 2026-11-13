@@ -3,7 +3,11 @@ import { realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { AppServerClient } from "./app-server.ts";
 
-type Project = { id: string; name: string; roots: Array<{ path: string }> };
+interface Project {
+  id: string;
+  name: string;
+  roots: Array<{ path: string }>;
+}
 
 export function gitProjectRoot(repo: string): string | null {
   const result = Bun.spawnSync(
@@ -68,6 +72,7 @@ export async function projectIdForRepo(
   const matches: Project[] = [];
   let cursor: string | null = null;
   do {
+    // biome-ignore lint/performance/noAwaitInLoops: Each page requires the previous response cursor.
     const page = (await client.request("project/list", {
       limit: 100,
       ...(cursor ? { cursor } : {}),
@@ -83,8 +88,9 @@ export async function projectIdForRepo(
     cursor = page.nextCursor;
   } while (cursor);
 
-  if (matches.length === 1) {
-    return matches[0]!.id;
+  const [onlyMatch] = matches;
+  if (matches.length === 1 && onlyMatch) {
+    return onlyMatch.id;
   }
   const name = basename(root);
   const named = matches.find((project) => project.name === name);

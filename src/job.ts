@@ -14,12 +14,12 @@ import { jobDir, jobsRoot, codexctlHome } from "./state.ts";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
-type JobProgress = {
+interface JobProgress {
   current: { type: string; startedAt: string; command?: string } | null;
   lastCommentary: string | null;
   commands: { run: number; failed: number };
   totalTokens: number | null;
-};
+}
 
 function emptyProgress(): JobProgress {
   return {
@@ -31,16 +31,23 @@ function emptyProgress(): JobProgress {
 }
 
 class JobOperationError extends Error {
+  readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable";
+  readonly exitCode: number;
+
   constructor(
-    readonly code: "job_not_terminal" | "job_worker_alive" | "job_unreadable",
     message: string,
-    readonly exitCode = 2
+    options: ErrorOptions & {
+      code: "job_not_terminal" | "job_worker_alive" | "job_unreadable";
+      exitCode?: number;
+    }
   ) {
-    super(message);
+    super(message, options);
+    this.code = options.code;
+    this.exitCode = options.exitCode ?? 2;
   }
 }
 
-export type JobRecord = {
+export interface JobRecord {
   key: string;
   jobIncarnation: string | null;
   repo: string;
@@ -67,7 +74,7 @@ export type JobRecord = {
   controlOffset: number;
   resumeCommandId: string | null;
   error: string | null;
-};
+}
 
 type ApprovalStatus =
   | "pending"
@@ -76,7 +83,7 @@ type ApprovalStatus =
   | "cancelled"
   | "unsupported";
 
-type ApprovalRecord = {
+interface ApprovalRecord {
   id: string;
   serverRequestId: string | number;
   method: string;
@@ -86,60 +93,60 @@ type ApprovalRecord = {
   resolvedAt: string | null;
   decision: string | null;
   error: string | null;
-};
+}
 
-type TurnSteerCommand = {
+interface TurnSteerCommand {
   id: string;
   type: "turn.steer";
   resume?: true;
   at: string;
   input: Array<{ type: "text"; text: string }>;
-};
+}
 
-type ApprovalResolveCommand = {
+interface ApprovalResolveCommand {
   id: string;
   type: "approval.resolve";
   at: string;
   approvalId: string;
   decision: "approve" | "approveForSession" | "reject" | "cancel";
-};
+}
 
-type TurnInterruptCommand = {
+interface TurnInterruptCommand {
   id: string;
   type: "turn.interrupt";
   at: string;
-};
+}
 
 type ControlCommand =
   | TurnSteerCommand
   | ApprovalResolveCommand
   | TurnInterruptCommand;
 
-type CreateJobOptions = {
+interface CreateJobOptions {
   key: string;
   repo: string;
   prompt: string;
   force?: boolean;
-};
+}
 
-type JobCancelResult = {
+interface JobCancelResult {
   action: "interrupt_queued" | "none";
   reason: string;
   job: JobRecord;
   command: TurnInterruptCommand | null;
-};
+}
 
-type JobRemoveOptions = {
+interface JobRemoveOptions {
   dryRun?: boolean;
   force?: boolean;
-};
+}
 
-type JobRemoveResult = {
+interface JobRemoveResult {
   action: "removed" | "would_remove";
   key: string;
   status: JobStatus | "unreadable";
   reason: string;
-};
+}
 
 type JobListItem = Pick<
   JobRecord,
@@ -179,14 +186,14 @@ type JobSummary = Pick<
   recentEvents: unknown[];
 };
 
-type JobWaitOptions = {
+interface JobWaitOptions {
   eventLimit?: number;
   ignoredApprovalIds?: string[];
   intervalMs?: number;
   timeoutMs?: number | null;
-};
+}
 
-type JobWaitResult = {
+interface JobWaitResult {
   key: string;
   ready: boolean;
   reason: "terminal" | "approval_required" | "timeout";
@@ -197,12 +204,12 @@ type JobWaitResult = {
   deadlineAt: string | null;
   status: JobStatus;
   summary: JobSummary;
-};
+}
 
-type ApprovalDecisionAndWaitResult = {
+interface ApprovalDecisionAndWaitResult {
   command: ApprovalResolveCommand;
   wait: JobWaitResult;
-};
+}
 
 export async function runJob(options: CreateJobOptions): Promise<JobRecord> {
   const record = await createJob(options);
@@ -258,24 +265,24 @@ export async function removeJob(
   } catch (error) {
     if (!options.force) {
       throw new JobOperationError(
-        "job_unreadable",
-        `Job '${key}' could not be read: ${error instanceof Error ? error.message : String(error)}`
+        `Job '${key}' could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        { code: "job_unreadable", cause: error }
       );
     }
   }
 
   if (job) {
-    status = job.status;
+    ({ status } = job);
     if (job.workerPid !== null && isProcessAlive(job.workerPid)) {
       throw new JobOperationError(
-        "job_worker_alive",
-        `Job '${key}' still has live worker ${job.workerPid}; cancel or wait before removing it`
+        `Job '${key}' still has live worker ${job.workerPid}; cancel or wait before removing it`,
+        { code: "job_worker_alive" }
       );
     }
     if (!(isTerminalStatus(job.status) || options.force)) {
       throw new JobOperationError(
-        "job_not_terminal",
-        `Job '${key}' is ${job.status}; only terminal jobs can be removed without --force`
+        `Job '${key}' is ${job.status}; only terminal jobs can be removed without --force`,
+        { code: "job_not_terminal" }
       );
     }
   } else {
@@ -310,7 +317,7 @@ export async function cancelJob(key: string): Promise<JobCancelResult> {
     type: "turn.interrupt",
     at: new Date().toISOString(),
   };
-  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  await appendFile(`${dir}/control.jsonl`, `${JSON.stringify(command)}\n`);
   return {
     action: "interrupt_queued",
     reason: "turn interrupt command queued",
@@ -332,14 +339,15 @@ export async function createJob(options: CreateJobOptions): Promise<JobRecord> {
     }
     if (!options.force) {
       throw new Error(
-        `Job '${options.key}' already exists; use --force to replace its local record`
+        `Job '${options.key}' already exists; use --force to replace its local record`,
+        { cause: error }
       );
     }
     const existing = await readJob(options.key);
     if (isProcessAlive(existing.workerPid)) {
       throw new JobOperationError(
-        "job_worker_alive",
-        `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`
+        `Job '${options.key}' still has live worker ${existing.workerPid}; cancel or wait before replacing it`,
+        { code: "job_worker_alive", cause: error }
       );
     }
   }
@@ -400,36 +408,46 @@ function spawnDetachedWorker(key: string, resumeCommandId?: string): void {
   proc.unref();
 }
 
-export async function runJobWorker(key: string): Promise<JobRecord> {
-  const dir = jobDir(key);
-  let record = await readJob(key);
+async function prepareResume(
+  key: string,
+  dir: string,
+  record: JobRecord
+): Promise<JobRecord> {
+  let resumed = record;
   const resumeId = process.env.CODEXCTL_RESUME_COMMAND_ID;
   if (resumeId) {
     // A terminal state is visible before the previous worker finishes its webhook.
-    while (isProcessAlive(record.workerPid)) {
+    while (isProcessAlive(resumed.workerPid)) {
+      // biome-ignore lint/performance/noAwaitInLoops: Wait for the previous worker to finish its notification before resuming the same job.
       await Bun.sleep(50);
     }
-    record = await readJob(key);
+    resumed = await readJob(key);
     const controls = await readNewCompleteLines(
       `${dir}/control.jsonl`,
-      record.controlOffset
+      resumed.controlOffset
     );
-    let offset = record.controlOffset;
+    let offset = resumed.controlOffset;
     for (const line of controls.lines) {
-      offset += Buffer.byteLength(line + "\n");
+      offset += Buffer.byteLength(`${line}\n`);
       const command = JSON.parse(line) as ControlCommand;
       if (command.id !== resumeId || command.type !== "turn.steer") {
         continue;
       }
-      record.prompt = command.input.map((item) => item.text).join("\n");
-      record.controlOffset = offset;
-      record.resumeCommandId = command.id;
+      resumed.prompt = command.input.map((item) => item.text).join("\n");
+      resumed.controlOffset = offset;
+      resumed.resumeCommandId = command.id;
       break;
     }
-    if (record.resumeCommandId !== resumeId) {
+    if (resumed.resumeCommandId !== resumeId) {
       throw new Error("Resume command not found");
     }
   }
+  return resumed;
+}
+
+export async function runJobWorker(key: string): Promise<JobRecord> {
+  const dir = jobDir(key);
+  const record = await prepareResume(key, dir, await readJob(key));
   record.status = "running";
   record.startedAt = new Date().toISOString();
   record.updatedAt = record.startedAt;
@@ -589,7 +607,7 @@ export async function readJob(key: string): Promise<JobRecord> {
   return record;
 }
 
-export async function readJobEvents(key: string): Promise<unknown[]> {
+export function readJobEvents(key: string): Promise<unknown[]> {
   return readRawEvents(`${jobDir(key)}/events.jsonl`);
 }
 
@@ -642,7 +660,9 @@ export async function waitForJob(
   const startedAt = Date.now();
   const deadline = timeoutMs === null ? null : startedAt + timeoutMs;
 
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: Continue polling until readiness or timeout returns a result; this loop has no fixed iteration limit.
   while (true) {
+    // biome-ignore lint/performance/noAwaitInLoops: Each poll rereads the job and queued resume before deciding readiness or timeout.
     const job = await readJob(key);
     const summary = await summarizeRecord(job, eventLimit);
     const pending = isTerminalStatus(job.status)
@@ -721,7 +741,7 @@ export async function enqueueSteer(
     at: new Date().toISOString(),
     input: [{ type: "text", text: prompt }],
   };
-  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  await appendFile(`${dir}/control.jsonl`, `${JSON.stringify(command)}\n`);
   if (isTerminalStatus(job.status) && !resumeQueued) {
     spawnDetachedWorker(key, command.id);
   }
@@ -787,7 +807,7 @@ export async function enqueueApprovalDecision(
     approvalId,
     decision,
   };
-  await appendFile(`${dir}/control.jsonl`, JSON.stringify(command) + "\n");
+  await appendFile(`${dir}/control.jsonl`, `${JSON.stringify(command)}\n`);
   return command;
 }
 
@@ -797,8 +817,9 @@ async function waitForTurnCompletion(
   dir: string,
   processedControlIds: Set<string>
 ): Promise<void> {
-  let controlOffset = record.controlOffset;
+  let { controlOffset } = record;
   while (record.status === "running") {
+    // biome-ignore lint/performance/noAwaitInLoops: Poll and apply queued controls before checking the running turn again.
     controlOffset = await processControlCommands(
       record,
       client,
@@ -848,30 +869,7 @@ function updateRecordFromEvent(
     }
   }
   if (method === "item/started") {
-    const itemType = getNestedString(params, ["item", "type"]);
-    const phase = getNestedString(params, ["item", "phase"]);
-    if (itemType) {
-      currentItem.id = getNestedString(params, ["item", "id"]);
-      record.progress.current = {
-        type: itemType,
-        startedAt: event.at,
-        ...(itemType === "commandExecution"
-          ? {
-              command: Array.from(
-                getNestedString(params, ["item", "command"]) ?? ""
-              )
-                .slice(0, 200)
-                .join(""),
-            }
-          : {}),
-      };
-    }
-    if (itemType === "agentMessage") {
-      record.latestAgentMessage = "";
-    }
-    if (itemType === "agentMessage" && phase === "final_answer") {
-      record.finalResponse = "";
-    }
+    updateStartedItem(record, params, event.at, currentItem);
   }
   if (method === "item/agentMessage/delta") {
     const delta = getNestedString(params, ["delta"]);
@@ -880,80 +878,130 @@ function updateRecordFromEvent(
     }
   }
   if (method === "item/completed") {
-    const itemType = getNestedString(params, ["item", "type"]);
-    const phase = getNestedString(params, ["item", "phase"]);
-    const text = getNestedString(params, ["item", "text"]);
-    if (
-      currentItem.id !== null &&
-      currentItem.id === getNestedString(params, ["item", "id"])
-    ) {
-      record.progress.current = null;
-      currentItem.id = null;
-    }
-    if (
-      itemType === "commandExecution" &&
-      isObject(params) &&
-      isObject(params.item)
-    ) {
-      record.progress.commands.run++;
-      if (
-        (typeof params.item.exitCode === "number" &&
-          params.item.exitCode !== 0) ||
-        params.item.status !== "completed"
-      ) {
-        record.progress.commands.failed++;
-      }
-    }
-    if (
-      itemType === "agentMessage" &&
-      phase === "commentary" &&
-      text !== null
-    ) {
-      record.progress.lastCommentary = Array.from(text).slice(0, 500).join("");
-    }
-    if (itemType === "agentMessage" && text !== null) {
-      record.latestAgentMessage = text;
-    }
-    if (
-      itemType === "agentMessage" &&
-      phase === "final_answer" &&
-      text !== null
-    ) {
-      record.finalResponse = text;
-    }
+    updateCompletedItem(record, params, currentItem);
   }
-  if (
-    method === "thread/tokenUsage/updated" &&
-    isObject(params) &&
-    isObject(params.tokenUsage) &&
-    isObject(params.tokenUsage.total)
-  ) {
-    const totalTokens = params.tokenUsage.total.totalTokens;
-    if (typeof totalTokens === "number") {
-      record.progress.totalTokens = totalTokens;
-    }
+  if (method === "thread/tokenUsage/updated") {
+    updateTotalTokens(record, params);
   }
   if (method === "turn/completed") {
-    record.progress.current = null;
-    currentItem.id = null;
-    const status = getNestedString(params, ["turn", "status"]);
-    record.status =
-      status === "failed"
-        ? "failed"
-        : status === "interrupted"
-          ? "cancelled"
-          : "completed";
-    record.error =
-      record.status === "cancelled"
-        ? null
-        : getNestedString(params, ["turn", "error", "message"]);
-    record.completedAt = new Date().toISOString();
+    completeTurn(record, params, currentItem);
   }
   if (method === "error") {
     record.status = "failed";
     record.error = JSON.stringify(params);
   }
   record.updatedAt = new Date().toISOString();
+}
+
+function updateTotalTokens(record: JobRecord, params: unknown): void {
+  if (
+    isObject(params) &&
+    isObject(params.tokenUsage) &&
+    isObject(params.tokenUsage.total)
+  ) {
+    const { totalTokens } = params.tokenUsage.total;
+    if (typeof totalTokens === "number") {
+      record.progress.totalTokens = totalTokens;
+    }
+  }
+}
+
+function updateStartedItem(
+  record: JobRecord,
+  params: unknown,
+  at: string,
+  currentItem: { id: string | null }
+): void {
+  const itemType = getNestedString(params, ["item", "type"]);
+  const phase = getNestedString(params, ["item", "phase"]);
+  if (itemType) {
+    currentItem.id = getNestedString(params, ["item", "id"]);
+    record.progress.current = {
+      type: itemType,
+      startedAt: at,
+      ...(itemType === "commandExecution"
+        ? {
+            command: Array.from(
+              getNestedString(params, ["item", "command"]) ?? ""
+            )
+              .slice(0, 200)
+              .join(""),
+          }
+        : {}),
+    };
+  }
+  if (itemType === "agentMessage") {
+    record.latestAgentMessage = "";
+  }
+  if (itemType === "agentMessage" && phase === "final_answer") {
+    record.finalResponse = "";
+  }
+}
+
+function updateCompletedItem(
+  record: JobRecord,
+  params: unknown,
+  currentItem: { id: string | null }
+): void {
+  const itemType = getNestedString(params, ["item", "type"]);
+  const phase = getNestedString(params, ["item", "phase"]);
+  const text = getNestedString(params, ["item", "text"]);
+  if (
+    currentItem.id !== null &&
+    currentItem.id === getNestedString(params, ["item", "id"])
+  ) {
+    record.progress.current = null;
+    currentItem.id = null;
+  }
+  if (
+    itemType === "commandExecution" &&
+    isObject(params) &&
+    isObject(params.item)
+  ) {
+    record.progress.commands.run += 1;
+    if (
+      (typeof params.item.exitCode === "number" &&
+        params.item.exitCode !== 0) ||
+      params.item.status !== "completed"
+    ) {
+      record.progress.commands.failed += 1;
+    }
+  }
+  if (itemType === "agentMessage" && phase === "commentary" && text !== null) {
+    record.progress.lastCommentary = Array.from(text).slice(0, 500).join("");
+  }
+  if (itemType === "agentMessage" && text !== null) {
+    record.latestAgentMessage = text;
+  }
+  if (
+    itemType === "agentMessage" &&
+    phase === "final_answer" &&
+    text !== null
+  ) {
+    record.finalResponse = text;
+  }
+}
+
+function completeTurn(
+  record: JobRecord,
+  params: unknown,
+  currentItem: { id: string | null }
+): void {
+  record.progress.current = null;
+  currentItem.id = null;
+  const status = getNestedString(params, ["turn", "status"]);
+  if (status === "failed") {
+    record.status = "failed";
+  } else if (status === "interrupted") {
+    record.status = "cancelled";
+  } else {
+    record.status = "completed";
+  }
+  record.error =
+    record.status === "cancelled"
+      ? null
+      : getNestedString(params, ["turn", "error", "message"]);
+  record.completedAt = new Date().toISOString();
 }
 
 async function processControlCommands(
@@ -969,11 +1017,12 @@ async function processControlCommands(
   }
   for (const line of result.lines) {
     const command = JSON.parse(line) as ControlCommand;
-    record.controlOffset += Buffer.byteLength(line + "\n");
+    record.controlOffset += Buffer.byteLength(`${line}\n`);
     if (processedControlIds.has(command.id)) {
       continue;
     }
     processedControlIds.add(command.id);
+    // biome-ignore lint/performance/noAwaitInLoops: Apply control commands and persist their audit records in queue order.
     await appendEvent(dir, {
       direction: "worker",
       event: {
@@ -1059,7 +1108,7 @@ async function resolveApprovalCommand(
   const approval = record.approvals.find(
     (candidate) => candidate.id === command.approvalId
   );
-  if (!approval || approval.status !== "pending") {
+  if (approval?.status !== "pending") {
     await appendEvent(dir, {
       direction: "worker",
       event: {
@@ -1096,12 +1145,13 @@ async function resolveApprovalCommand(
   }
 
   await client.respond(approval.serverRequestId, result.response);
-  approval.status =
-    command.decision === "cancel"
-      ? "cancelled"
-      : command.decision.startsWith("approve")
-        ? "approved"
-        : "rejected";
+  if (command.decision === "cancel") {
+    approval.status = "cancelled";
+  } else if (command.decision.startsWith("approve")) {
+    approval.status = "approved";
+  } else {
+    approval.status = "rejected";
+  }
   approval.decision = command.decision;
   approval.resolvedAt = new Date().toISOString();
   record.updatedAt = new Date().toISOString();
@@ -1248,7 +1298,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 // Atomic replacement keeps CLI readers from observing a partially written JSON file.
 let recordWrite = Promise.resolve();
 function writeJobRecord(dir: string, record: JobRecord): Promise<void> {
-  const json = JSON.stringify(record, null, 2) + "\n";
+  const json = `${JSON.stringify(record, null, 2)}\n`;
   recordWrite = recordWrite.then(async () => {
     await Bun.write(`${dir}/job.json.tmp`, json);
     await rename(`${dir}/job.json.tmp`, `${dir}/job.json`);

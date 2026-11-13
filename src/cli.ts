@@ -17,18 +17,23 @@ import {
 } from "./job.ts";
 import { loadEnvFile } from "./env.ts";
 
-type Args = {
+interface Args {
   positionals: string[];
   flags: Map<string, string | boolean>;
-};
+}
 
 class CliError extends Error {
+  readonly code: "usage_error" | "invalid_flag";
+  readonly exitCode: number;
+
   constructor(
-    readonly code: "usage_error" | "invalid_flag",
+    code: "usage_error" | "invalid_flag",
     message: string,
-    readonly exitCode = 2
+    exitCode = 2
   ) {
     super(message);
+    this.code = code;
+    this.exitCode = exitCode;
   }
 }
 
@@ -52,7 +57,7 @@ const knownPublicFlags = [
 async function main(argv: string[]): Promise<void> {
   await loadEnvFile();
   const args = parseArgs(argv);
-  const [resource, action, key, extra] = args.positionals;
+  const [resource, action, key] = args.positionals;
 
   if (booleanFlag(args, "help") || resource === "help") {
     await printJson({ usage: usageText() });
@@ -61,6 +66,25 @@ async function main(argv: string[]): Promise<void> {
 
   allowFlags(args, knownPublicFlags);
 
+  if (
+    (await handleJobCommands(args)) ||
+    (await handleJobControl(args)) ||
+    (await handleApprovalCommand(args))
+  ) {
+    return;
+  }
+
+  if (resource === "internal" && action === "worker" && key) {
+    allowFlags(args, []);
+    await runJobWorker(key);
+    return;
+  }
+
+  throw new CliError("usage_error", usageText());
+}
+
+async function handleJobCommands(args: Args): Promise<boolean> {
+  const [resource, action, key] = args.positionals;
   if (resource === "job" && action === "run") {
     allowFlags(args, ["key", "repo", "prompt", "force"]);
     await printJson(
@@ -71,26 +95,26 @@ async function main(argv: string[]): Promise<void> {
         force: booleanFlag(args, "force"),
       })
     );
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "notify" && key) {
     requirePositionalCount(args, 3);
     allowFlags(args, []);
     await printJson(await notifyJob(key));
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "list") {
     allowFlags(args, []);
     await printJson(await listJobs());
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "summary" && key) {
     allowFlags(args, ["events"]);
     await printJson(await readJobSummary(key, eventLimitFlag(args)));
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "wait" && key) {
@@ -103,7 +127,7 @@ async function main(argv: string[]): Promise<void> {
         timeoutMs: numberFlag(args, "timeout-ms"),
       })
     );
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "events" && key) {
@@ -112,19 +136,24 @@ async function main(argv: string[]): Promise<void> {
     for (const event of await readJobEvents(key)) {
       console.log(JSON.stringify(event));
     }
-    return;
+    return true;
   }
 
+  return false;
+}
+
+async function handleJobControl(args: Args): Promise<boolean> {
+  const [resource, action, key] = args.positionals;
   if (resource === "job" && action === "steer" && key) {
     allowFlags(args, ["prompt"]);
     await printJson(await enqueueSteer(key, requiredString(args, "prompt")));
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "cancel" && key) {
     allowFlags(args, []);
     await printJson(await cancelJob(key));
-    return;
+    return true;
   }
 
   if (resource === "job" && action === "rm" && key) {
@@ -136,19 +165,24 @@ async function main(argv: string[]): Promise<void> {
         dryRun: booleanFlag(args, "dry-run"),
       })
     );
-    return;
+    return true;
   }
 
+  return false;
+}
+
+async function handleApprovalCommand(args: Args): Promise<boolean> {
+  const [resource, action, key, extra] = args.positionals;
   if (resource === "approval" && action === "list" && key) {
     allowFlags(args, ["all"]);
     await printJson(await readApprovals(key, booleanFlag(args, "all")));
-    return;
+    return true;
   }
 
   if (resource === "approval" && action === "show" && key && extra) {
     allowFlags(args, []);
     await printJson(await readApproval(key, extra));
-    return;
+    return true;
   }
 
   if (resource === "approval" && action === "approve" && key && extra) {
@@ -170,7 +204,7 @@ async function main(argv: string[]): Promise<void> {
     } else {
       await printJson(await enqueueApprovalDecision(key, extra, decision));
     }
-    return;
+    return true;
   }
 
   if (resource === "approval" && action === "reject" && key && extra) {
@@ -184,22 +218,16 @@ async function main(argv: string[]): Promise<void> {
     } else {
       await printJson(await enqueueApprovalDecision(key, extra, decision));
     }
-    return;
+    return true;
   }
 
-  if (resource === "internal" && action === "worker" && key) {
-    allowFlags(args, []);
-    await runJobWorker(key);
-    return;
-  }
-
-  throw new CliError("usage_error", usageText());
+  return false;
 }
 
 export function parseArgs(argv: string[]): Args {
   const positionals: string[] = [];
   const flags = new Map<string, string | boolean>();
-  for (let index = 0; index < argv.length; index++) {
+  for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (!arg) {
       continue;
@@ -228,7 +256,7 @@ export function parseArgs(argv: string[]): Args {
       continue;
     }
     flags.set(name, next);
-    index++;
+    index += 1;
   }
   return { positionals, flags };
 }
@@ -346,7 +374,7 @@ function numberFlag(args: Args, name: string): number | null {
 }
 
 async function printJson(value: unknown): Promise<void> {
-  await Bun.write(Bun.stdout, JSON.stringify(value, null, 2) + "\n");
+  await Bun.write(Bun.stdout, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function usageText(): string {
@@ -386,14 +414,14 @@ if (import.meta.main) {
     const message = error instanceof Error ? error.message : String(error);
     await Bun.write(
       Bun.stderr,
-      JSON.stringify(
+      `${JSON.stringify(
         {
           ok: false,
           error: { code: errorCode(error), message },
         },
         null,
         2
-      ) + "\n"
+      )}\n`
     );
     process.exit(exitCode);
   });

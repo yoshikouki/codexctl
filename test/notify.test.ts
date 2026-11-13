@@ -12,6 +12,21 @@ import {
 import { sendJobNotification } from "../src/notify.ts";
 import { jobDir } from "../src/state.ts";
 
+interface NotificationBody {
+  event: string;
+  approvalId?: string;
+  finalResponse: string;
+  at: string;
+  status: string;
+}
+
+interface RecordedEvent {
+  direction: string;
+  at: string;
+  event?: Record<string, unknown>;
+  message?: { method?: string; params?: unknown };
+}
+
 const git = (...args: string[]) => {
   const result = Bun.spawnSync(["git", ...args], {
     stdout: "pipe",
@@ -31,7 +46,7 @@ let server: ReturnType<typeof Bun.serve>;
 let received: Array<{
   auth: string | null;
   contentType: string | null;
-  body: any;
+  body: NotificationBody;
 }>;
 
 beforeEach(async () => {
@@ -63,7 +78,7 @@ beforeEach(async () => {
       received.push({
         auth: request.headers.get("authorization"),
         contentType: request.headers.get("content-type"),
-        body: await request.json(),
+        body: (await request.json()) as NotificationBody,
       });
       return new Response("ok");
     },
@@ -108,8 +123,9 @@ afterEach(async () => {
 });
 
 async function waitExited(key: string) {
-  for (let i = 0; i < 400; i++) {
-    const events = (await readJobEvents(key)) as any[];
+  for (let i = 0; i < 400; i += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: Poll until the detached worker records the expected notification or exit.
+    const events = (await readJobEvents(key)) as RecordedEvent[];
     if (events.some((e) => e.event?.type === "worker.exited")) {
       return;
     }
@@ -118,7 +134,7 @@ async function waitExited(key: string) {
   throw new Error("worker did not exit");
 }
 
-async function start(key = "demo") {
+function start(key = "demo") {
   return runJob({ key, repo, prompt: "fixture only" });
 }
 
@@ -132,62 +148,62 @@ async function assertPrivate(
     "worker.log",
     "worker.err.log",
   ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: Check secret redaction in file order so the first leaking artifact is reported consistently.
     const text = await Bun.file(join(jobDir(key), file)).text();
     expect(text).not.toContain(url);
     expect(text).not.toContain(process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY!);
   }
 }
 
-for (const [mode, status] of [
+test.each([
   ["completed", "completed"],
   ["failed", "failed"],
   ["interrupted", "cancelled"],
   ["crash", "failed"],
-] as const) {
-  test(`detached worker sends exactly once: ${mode}`, async () => {
-    process.env.TEST_MODE = mode;
-    await start();
-    await waitExited("demo");
-    expect((await readJob("demo")).status).toBe(status);
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({
-      auth: "Bearer test-notification-secret",
-      contentType: "application/json",
-      body: {
-        source: "codexctl",
-        event: `job.${status}`,
-        key: "demo",
-        status,
-        repo,
-        threadId: "thread-test",
-      },
-    });
-    expect(received[0]!.body).not.toHaveProperty("approvalId");
-    expect(
-      Array.from(received[0]!.body.finalResponse).length
-    ).toBeLessThanOrEqual(2000);
-    expect(Number.isNaN(Date.parse(received[0]!.body.at))).toBe(false);
-    const sent = ((await readJobEvents("demo")) as any[]).filter(
-      (e) => e.event?.type === "notify.sent"
-    );
-    expect(sent).toHaveLength(1);
-    const started = ((await readJobEvents("demo")) as any[]).find(
-      (e) => e.message?.method === "thread/start"
-    );
-    expect(started.message.params).toEqual({
-      cwd: repo,
-      projectId: "project-test",
-    });
-    expect((await readJobSummary("demo", 0)).lastNotification).toEqual({
-      status: "sent",
-      at: sent[0].at,
-    });
-    await assertPrivate();
+] as const)("detached worker sends exactly once: %s", async (mode, status) => {
+  process.env.TEST_MODE = mode;
+  await start();
+  await waitExited("demo");
+  expect((await readJob("demo")).status).toBe(status);
+  expect(received).toHaveLength(1);
+  expect(received[0]).toMatchObject({
+    auth: "Bearer test-notification-secret",
+    contentType: "application/json",
+    body: {
+      source: "codexctl",
+      event: `job.${status}`,
+      key: "demo",
+      status,
+      repo,
+      threadId: "thread-test",
+    },
   });
-}
+  expect(received[0]!.body).not.toHaveProperty("approvalId");
+  expect(
+    Array.from(received[0]!.body.finalResponse).length
+  ).toBeLessThanOrEqual(2000);
+  expect(Number.isNaN(Date.parse(received[0]!.body.at))).toBe(false);
+  const sent = ((await readJobEvents("demo")) as RecordedEvent[]).filter(
+    (e) => e.event?.type === "notify.sent"
+  );
+  expect(sent).toHaveLength(1);
+  const started = ((await readJobEvents("demo")) as RecordedEvent[]).find(
+    (e) => e.message?.method === "thread/start"
+  );
+  expect(started!.message!.params).toEqual({
+    cwd: repo,
+    projectId: "project-test",
+  });
+  expect((await readJobSummary("demo", 0)).lastNotification).toEqual({
+    status: "sent",
+    at: sent[0]!.at,
+  });
+  await assertPrivate();
+});
 
-for (const caller of ["CLI", "worker only"]) {
-  test(`${caller} loads notification credentials from the env file`, async () => {
+test.each(["CLI", "worker only"])(
+  "%s loads notification credentials from the env file",
+  async (caller) => {
     const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!;
     const key = process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY!;
     await mkdir(join(tmp, ".config/codexctl"), { recursive: true });
@@ -235,13 +251,14 @@ for (const caller of ["CLI", "worker only"]) {
     expect(received[0]!.auth).toBe(`Bearer ${key}`);
     process.env.CODEXCTL_GROK_BOT_NOTIFY_KEY = key;
     await assertPrivate("demo", url);
-  });
-}
+  }
+);
 
 test("approval IDs notify once each, before completion", async () => {
   process.env.TEST_MODE = "approval";
   await start();
-  for (let i = 0; i < 100 && received.length < 2; i++) {
+  for (let i = 0; i < 100 && received.length < 2; i += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: Poll until the detached worker records the expected notification or exit.
     await Bun.sleep(20);
   }
   expect(received.map((r) => r.body.approvalId)).toEqual(["91", "92"]);
@@ -264,29 +281,30 @@ test("approval IDs notify once each, before completion", async () => {
   await assertPrivate();
 });
 
-for (const mode of ["completed", "failed", "interrupted", "crash"]) {
-  test(`unset URL records one skip: ${mode}; manual error is unchanged`, async () => {
+test.each(["completed", "failed", "interrupted", "crash"])(
+  "unset URL records one skip: %s; manual error is unchanged",
+  async (mode) => {
     process.env.TEST_MODE = mode;
     const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL!;
     delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
     await start();
     await waitExited("demo");
     expect(received).toHaveLength(0);
-    const events = (await readJobEvents("demo")) as any[];
+    const events = (await readJobEvents("demo")) as RecordedEvent[];
     const skipped = events.filter((e) => e.event?.type === "notify.skipped");
     expect(skipped).toHaveLength(1);
-    expect(skipped[0].event).toEqual({
+    expect(skipped[0]!.event).toEqual({
       type: "notify.skipped",
       reason: "not_configured",
     });
-    expect(Number.isNaN(Date.parse(skipped[0].at))).toBe(false);
+    expect(Number.isNaN(Date.parse(skipped[0]!.at))).toBe(false);
     const summary = await readJobSummary("demo", 0);
     expect((await readJob("demo")).lastNotification).toEqual(
       summary.lastNotification
     );
     expect(summary.lastNotification).toEqual({
       status: "skipped",
-      at: skipped[0].at,
+      at: skipped[0]!.at,
     });
     expect(summary.recentEvents).toEqual([]);
     const result = await manual();
@@ -294,8 +312,8 @@ for (const mode of ["completed", "failed", "interrupted", "crash"]) {
     expect(JSON.parse(result.stderr).error.code).toBe("notify_not_configured");
     expect(await readJobEvents("demo")).toEqual(events);
     await assertPrivate("demo", url);
-  });
-}
+  }
+);
 
 test("unset URL records one skip per approval ID and then completion", async () => {
   process.env.TEST_MODE = "approval";
@@ -303,10 +321,11 @@ test("unset URL records one skip per approval ID and then completion", async () 
   delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
   await start();
   const skips = async () =>
-    ((await readJobEvents("demo")) as any[]).filter(
+    ((await readJobEvents("demo")) as RecordedEvent[]).filter(
       (e) => e.event?.type === "notify.skipped"
     );
-  for (let i = 0; i < 100 && (await skips()).length < 2; i++) {
+  // biome-ignore lint/performance/noAwaitInLoops: Poll until the detached worker records the expected notification or exit.
+  for (let i = 0; i < 100 && (await skips()).length < 2; i += 1) {
     await Bun.sleep(20);
   }
   expect(await skips()).toHaveLength(2);
@@ -328,14 +347,15 @@ test("summary reads worker notification results from job.json without the event 
     if (status === "skipped") {
       delete process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
     }
+    // biome-ignore lint/performance/noAwaitInLoops: Each case changes the shared webhook server and job records; complete it before starting the next case.
     await start(status);
     await waitExited(status);
     const job = await readJob(status);
-    const events = (await readJobEvents(status)) as any[];
+    const events = (await readJobEvents(status)) as RecordedEvent[];
     const notification = events.findLast(
       (e) => e.event?.type === `notify.${status}`
     );
-    expect(job.lastNotification).toEqual({ status, at: notification.at });
+    expect(job.lastNotification).toEqual({ status, at: notification!.at });
     await rm(join(jobDir(status), "events.jsonl"));
     expect((await readJobSummary(status)).lastNotification).toEqual(
       job.lastNotification
@@ -378,7 +398,7 @@ test("unreachable endpoint preserves completed state and records only an error t
   await start();
   await waitExited("demo");
   expect((await readJob("demo")).status).toBe("completed");
-  const failures = ((await readJobEvents("demo")) as any[]).filter(
+  const failures = ((await readJobEvents("demo")) as RecordedEvent[]).filter(
     (e) => e.event?.type === "notify.failed"
   );
   expect(failures.map((e) => e.event)).toEqual([
@@ -387,12 +407,13 @@ test("unreachable endpoint preserves completed state and records only an error t
   await assertPrivate();
 });
 
-for (const status of [302, 401, 500]) {
-  test(`HTTP ${status} does not retry or follow redirects`, async () => {
+test.each([302, 401, 500])(
+  "HTTP %s does not retry or follow redirects",
+  async (status) => {
     let count = 0;
     server.reload({
       fetch() {
-        count++;
+        count += 1;
         return new Response("private response", {
           status,
           headers: { Location: "/redirect" },
@@ -404,13 +425,13 @@ for (const status of [302, 401, 500]) {
     expect(count).toBe(1);
     expect((await readJob("demo")).status).toBe("completed");
     expect(
-      ((await readJobEvents("demo")) as any[])
+      ((await readJobEvents("demo")) as RecordedEvent[])
         .filter((e) => e.event?.type === "notify.failed")
         .map((e) => e.event)
     ).toEqual([{ type: "notify.failed", httpStatus: status }]);
     await assertPrivate();
-  });
-}
+  }
+);
 
 test("missing key fails without sending; known notification secrets are redacted", async () => {
   const job = await createJob({ key: "demo", repo, prompt: "fixture" });
@@ -430,7 +451,12 @@ test("missing key fails without sending; known notification secrets are redacted
 });
 
 test("request times out after ten seconds without changing the job", async () => {
-  server.reload({ fetch: () => new Promise<Response>(() => {}) });
+  server.reload({
+    fetch: () =>
+      new Promise<Response>(() => {
+        // Deliberately never resolve so the HTTP timeout is exercised.
+      }),
+  });
   const job = await createJob({ key: "demo", repo, prompt: "fixture" });
   const started = Date.now();
   expect(

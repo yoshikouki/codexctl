@@ -20,7 +20,7 @@ const git = (...args: string[]) => {
 
 // Tests create their own repositories so they do not depend on the test process running inside a Git checkout.
 async function withRepo(
-  run: (temp: string, repo: string) => Promise<void>
+  run: (temp: string, repo: string) => void | Promise<void>
 ): Promise<void> {
   const temp = await realpath(await mkdtemp("/tmp/codexctl-project-"));
   const repo = join(temp, "repo");
@@ -52,14 +52,14 @@ test("linked worktrees use the main checkout's Codex project", () =>
     expect(gitProjectRoot(repo)).toBe(repo);
     expect(gitProjectRoot(worktree)).toBe(repo);
 
-    const requests: Array<{ method: string; params: any }> = [];
+    const requests: Array<{ method: string; params?: unknown }> = [];
     const client = {
-      async request(method: string, params: any) {
+      request(method: string, params?: unknown) {
         requests.push({ method, params });
         if (method === "project/list") {
-          return { data: [], nextCursor: null };
+          return Promise.resolve({ data: [], nextCursor: null });
         }
-        return { project: { id: "project-1" } };
+        return Promise.resolve({ project: { id: "project-1" } });
       },
     } as AppServerClient;
     expect(await projectIdForRepo(client, worktree)).toBe("project-1");
@@ -73,14 +73,14 @@ test("reuses a project whose root is the main checkout", () =>
   withRepo(async (_temp, repo) => {
     const requests: string[] = [];
     const client = {
-      async request(method: string) {
+      request(method: string) {
         requests.push(method);
-        return {
+        return Promise.resolve({
           data: [
             { id: "existing", name: "Custom name", roots: [{ path: repo }] },
           ],
           nextCursor: null,
-        };
+        });
       },
     } as AppServerClient;
     expect(await projectIdForRepo(client, repo)).toBe("existing");
@@ -88,7 +88,7 @@ test("reuses a project whose root is the main checkout", () =>
   }));
 
 test("a linked worktree must end in the repository name before a job starts", () =>
-  withRepo(async (temp, repo) => {
+  withRepo((temp, repo) => {
     const wrong = join(temp, "task-id");
     git("-C", repo, "worktree", "add", "-q", wrong);
     expect(() => assertWorktreeRepoName(repo)).not.toThrow();

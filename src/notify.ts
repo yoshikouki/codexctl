@@ -33,7 +33,9 @@ export async function sendJobNotification(
         at,
       });
       await onRecorded?.({ status, at });
-    } catch {}
+    } catch {
+      // Audit I/O failures must not change the job result.
+    }
   };
   const url = process.env.CODEXCTL_GROK_BOT_NOTIFY_URL;
   if (!url) {
