@@ -40,8 +40,16 @@ type JsonRpcServerRequest = {
 };
 
 export type AppServerEvent =
-  | { direction: "client"; message: JsonRpcRequest | JsonRpcNotification | JsonRpcClientResponse; at: string }
-  | { direction: "server"; message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest; at: string }
+  | {
+      direction: "client";
+      message: JsonRpcRequest | JsonRpcNotification | JsonRpcClientResponse;
+      at: string;
+    }
+  | {
+      direction: "server";
+      message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest;
+      at: string;
+    }
   | { direction: "worker"; event: JsonObject; at: string }
   | { direction: "control"; command: JsonObject; at: string };
 
@@ -98,8 +106,13 @@ export class AppServerClient {
 
   async request(method: string, params?: unknown): Promise<unknown> {
     const id = this.#nextId++;
-    const message: JsonRpcRequest = params === undefined ? { id, method } : { id, method, params };
-    await this.#emit({ direction: "client", message, at: new Date().toISOString() });
+    const message: JsonRpcRequest =
+      params === undefined ? { id, method } : { id, method, params };
+    await this.#emit({
+      direction: "client",
+      message,
+      at: new Date().toISOString(),
+    });
     const response = new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
     });
@@ -113,14 +126,23 @@ export class AppServerClient {
   }
 
   async notify(method: string, params?: unknown): Promise<void> {
-    const message: JsonRpcNotification = params === undefined ? { method } : { method, params };
-    await this.#emit({ direction: "client", message, at: new Date().toISOString() });
+    const message: JsonRpcNotification =
+      params === undefined ? { method } : { method, params };
+    await this.#emit({
+      direction: "client",
+      message,
+      at: new Date().toISOString(),
+    });
     this.#proc.stdin.write(JSON.stringify(message) + "\n");
   }
 
   async respond(id: string | number, result: unknown): Promise<void> {
     const message: JsonRpcClientResponse = { id, result };
-    await this.#emit({ direction: "client", message, at: new Date().toISOString() });
+    await this.#emit({
+      direction: "client",
+      message,
+      at: new Date().toISOString(),
+    });
     this.#proc.stdin.write(JSON.stringify(message) + "\n");
   }
 
@@ -134,18 +156,24 @@ export class AppServerClient {
     return await this.#stderr;
   }
 
-  async #readLoop(reader: NodeReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>): Promise<void> {
+  async #readLoop(
+    reader: NodeReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
+  ): Promise<void> {
     const decoder = new TextDecoder();
     try {
       while (true) {
         const chunk = await reader.read();
-        if (chunk.done) break;
+        if (chunk.done) {
+          break;
+        }
         this.#buffer += decoder.decode(chunk.value, { stream: true });
         await this.#drainLines();
       }
       this.#rejectAll(new Error("codex app-server stdout closed"));
     } catch (error) {
-      this.#rejectAll(error instanceof Error ? error : new Error(String(error)));
+      this.#rejectAll(
+        error instanceof Error ? error : new Error(String(error))
+      );
       throw error;
     }
   }
@@ -153,23 +181,40 @@ export class AppServerClient {
   async #drainLines(): Promise<void> {
     while (true) {
       const newline = this.#buffer.indexOf("\n");
-      if (newline < 0) return;
+      if (newline < 0) {
+        return;
+      }
       const line = this.#buffer.slice(0, newline).trim();
       this.#buffer = this.#buffer.slice(newline + 1);
-      if (line.length === 0) continue;
+      if (line.length === 0) {
+        continue;
+      }
       let message: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest;
       try {
-        message = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest;
+        message = JSON.parse(line) as
+          | JsonRpcResponse
+          | JsonRpcNotification
+          | JsonRpcServerRequest;
       } catch (error) {
-        throw new Error(`Failed to parse app-server JSON-RPC line: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(
+          `Failed to parse app-server JSON-RPC line: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
-      await this.#emit({ direction: "server", message, at: new Date().toISOString() });
+      await this.#emit({
+        direction: "server",
+        message,
+        at: new Date().toISOString(),
+      });
       if ("id" in message && !("method" in message)) {
         const pending = this.#pending.get(message.id);
-        if (!pending) continue;
+        if (!pending) {
+          continue;
+        }
         this.#pending.delete(message.id);
         if (message.error) {
-          pending.reject(new Error(`${message.error.code}: ${message.error.message}`));
+          pending.reject(
+            new Error(`${message.error.code}: ${message.error.message}`)
+          );
         } else {
           pending.resolve(message.result);
         }
@@ -195,7 +240,9 @@ export class AppServerClient {
 }
 
 export function assertJobKey(key: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key) || key.includes("..")) {
-    throw new Error("Job key must be 1-128 chars of letters, numbers, dot, underscore, or dash; it cannot contain '..'");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(key) || key.includes("..")) {
+    throw new Error(
+      "Job key must be 1-128 chars of letters, numbers, dot, underscore, or dash; it cannot contain '..'"
+    );
   }
 }

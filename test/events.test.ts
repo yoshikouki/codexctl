@@ -7,8 +7,18 @@ test("event tail skips old records and preserves Unicode across chunk boundaries
   const tmp = await mkdtemp("/tmp/codexctl-tail-");
   try {
     const path = join(tmp, "events.jsonl");
-    const events = [{ text: "😀".repeat(20_000) }, { type: "second" }, { type: "last" }];
-    await Bun.write(path, "unparsed history".repeat(10_000) + "\n" + events.map(e => JSON.stringify(e)).join("\n \n") + "\n");
+    const events = [
+      { text: "😀".repeat(20_000) },
+      { type: "second" },
+      { type: "last" },
+    ];
+    await Bun.write(
+      path,
+      "unparsed history".repeat(10_000) +
+        "\n" +
+        events.map((e) => JSON.stringify(e)).join("\n \n") +
+        "\n"
+    );
     expect(await readTailEvents(path, 1)).toEqual(events.slice(-1));
     expect(await readTailEvents(path, 3)).toEqual(events);
     await Bun.write(path, JSON.stringify(events[1]));

@@ -9,10 +9,13 @@
   "scripts": {
     "codexctl": "bun run src/cli.ts",
     "test": "bun test --max-concurrency 1",
-    "typecheck": "bun x tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit",
+    "lint": "biome check ."
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.7",
     "@types/bun": "^1.4.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "ultracite": "8.2.0"
   }
 }

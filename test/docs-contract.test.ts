@@ -6,31 +6,49 @@ test("documented commands and flags exist in the CLI, including per-command flag
   const root = join(import.meta.dir, "..");
   const source = await Bun.file(join(root, "src/cli.ts")).text();
   const commands = new Map<string, Set<string>>();
-  for (const match of source.matchAll(/if \(resource === "(job|approval)" && action === "([^"]+)"[^\n]*\n([\s\S]*?)(?=^  if |^  throw)/gm)) {
-    const allowed = match[3]!.match(/allowFlags\(args, \[([^\]]*)\]/)![1]!;
-    commands.set(`${match[1]} ${match[2]}`, new Set([...allowed.matchAll(/"([^"]+)"/g)].map(m => m[1]!)));
+  for (const match of source.matchAll(
+    /if \(resource === "(job|approval)" && action === "([^"]+)"[^\n]*\n([\s\S]*?)(?=^ {2}if |^ {2}throw)/gmu
+  )) {
+    const allowed = match[3]!.match(/allowFlags\(args, \[([^\]]*)\]/u)![1]!;
+    commands.set(
+      `${match[1]} ${match[2]}`,
+      new Set([...allowed.matchAll(/"([^"]+)"/gu)].map((m) => m[1]!))
+    );
   }
-  const publicFlags = new Set([...commands.values()].flatMap(flags => [...flags]).concat("help", "json")); // --json is parsed and ignored by parseArgs; output is always JSON.
+  const publicFlags = new Set(
+    [...commands.values()].flatMap((flags) => [...flags]).concat("help", "json")
+  ); // --json is parsed and ignored by parseArgs; output is always JSON.
   const files = ["README.md", "docs/codexctl-agent-contract.md"];
-  for await (const path of new Bun.Glob("skills/codexctl/**/*.md").scan(root)) files.push(path);
+  for await (const path of new Bun.Glob("skills/codexctl/**/*.md").scan(root)) {
+    files.push(path);
+  }
   for (const file of files) {
     const text = await Bun.file(join(root, file)).text();
-    for (const match of text.matchAll(/\b(job|approval) ([a-z]+)\b/g)) {
+    for (const match of text.matchAll(/\b(job|approval) ([a-z]+)\b/gu)) {
       expect(commands.has(match[0]), `${file}: ${match[0]}`).toBe(true);
     }
-    for (const match of text.matchAll(/--([a-z][a-z-]*)/g)) {
+    for (const match of text.matchAll(/--([a-z][a-z-]*)/gu)) {
       expect(publicFlags.has(match[1]!), `${file}: ${match[0]}`).toBe(true);
     }
     for (const line of text.split("\n")) {
       // Contract table rows and executable examples must use their command's flags.
-      const command = line.match(/^(?:\| `codexctl |codexctl |bun run src\/cli.ts )(job|approval) ([a-z]+)\b/);
-      if (!command) continue;
+      const command = line.match(
+        /^(?:\| `codexctl |codexctl |bun run src\/cli.ts )(job|approval) ([a-z]+)\b/u
+      );
+      if (!command) {
+        continue;
+      }
       const name = `${command[1]} ${command[2]}`;
       const input = line.startsWith("|") ? line.split("|")[2]! : line;
       const flags = line.startsWith("|")
-        ? [...input.matchAll(/--([a-z][a-z-]*)/g)].map(m => m[1]!)
-        : [...parseArgs(input.match(/"[^"]*"|'[^']*'|\S+/g)!).flags.keys()];
-      for (const flag of flags) expect(commands.get(name)!.has(flag), `${file}: ${name} --${flag}`).toBe(true);
+        ? [...input.matchAll(/--([a-z][a-z-]*)/gu)].map((m) => m[1]!)
+        : [...parseArgs(input.match(/"[^"]*"|'[^']*'|\S+/gu)!).flags.keys()];
+      for (const flag of flags) {
+        expect(
+          commands.get(name)!.has(flag),
+          `${file}: ${name} --${flag}`
+        ).toBe(true);
+      }
     }
   }
 });
